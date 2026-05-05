@@ -1,4 +1,4 @@
-# Jupiter SOL Perps Slow Trader
+# Europa - A Jupiter SOL Perps Slow Trader
 
 This is a conservative Python scaffold for a medium-slow SOL perpetuals strategy on Jupiter.
 It is designed for 15-30 minute candles, swing entries, explicit risk sizing, and roughly 10 trades per week.
