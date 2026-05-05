@@ -1,0 +1,12 @@
+[project]
+name = "jupiter-sol-perps-slow-trader"
+version = "0.1.0"
+description = "Medium-slow swing trading scaffold for SOL perpetuals on Jupiter."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+sol-perps-bot = "trading.cli:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
