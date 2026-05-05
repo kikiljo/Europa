@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.env
+
+# Generated datasets and runtime state
+/data/**
+!/data/
+!/data/README.md
+!/data/SCHEMA.md
+
+# Generated local reports
+/reports/**

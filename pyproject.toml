@@ -1,12 +1,17 @@
 [project]
-name = "jupiter-sol-perps-slow-trader"
+name = "europa-jupiter-perps"
 version = "0.1.0"
-description = "Medium-slow swing trading scaffold for SOL perpetuals on Jupiter."
+description = "Medium-slow swing trading scaffold for Jupiter perpetuals."
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+	"plotly>=5.24",
+]
 
 [project.scripts]
 sol-perps-bot = "trading.cli:main"
+
+[tool.setuptools]
+packages = ["trading", "backtest"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

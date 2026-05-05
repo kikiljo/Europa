@@ -1,1 +1,1 @@
-"""Medium-slow SOL perpetuals trading scaffold for Jupiter."""
+"""Medium-slow Jupiter perpetuals trading scaffold."""

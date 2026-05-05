@@ -36,8 +36,11 @@ class Candle:
 
     @classmethod
     def from_mapping(cls, row: dict[str, Any]) -> "Candle":
+        raw_ts = row.get("ts") if "ts" in row else row.get("timestamp")
+        if raw_ts is None:
+            raise ValueError(f"candle row missing 'ts'/'timestamp': {row}")
         return cls(
-            timestamp=cls.parse_timestamp(str(row["timestamp"])),
+            timestamp=cls.parse_timestamp(str(raw_ts)),
             open=float(row["open"]),
             high=float(row["high"]),
             low=float(row["low"]),
@@ -47,7 +50,7 @@ class Candle:
 
     def to_csv_row(self) -> dict[str, str]:
         return {
-            "timestamp": self.timestamp.astimezone(timezone.utc).isoformat(),
+            "ts": self.timestamp.astimezone(timezone.utc).isoformat(),
             "open": f"{self.open:.10f}",
             "high": f"{self.high:.10f}",
             "low": f"{self.low:.10f}",

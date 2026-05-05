@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from trading.config import RiskConfig, StrategyConfig
-from trading.indicators import average_true_range, exponential_moving_average, relative_strength_index, rolling_high, rolling_low
+from trading.factors import compute_factor_series
 from trading.models import Candle, Position, Side, Signal, SignalAction
 
 
@@ -26,33 +26,25 @@ class SwingPerpsStrategy:
         if len(candles) < minimum_bars:
             return Signal(SignalAction.HOLD, f"need at least {minimum_bars} candles")
 
-        closes = [candle.close for candle in candles]
-        highs = [candle.high for candle in candles]
-        lows = [candle.low for candle in candles]
-        fast_ema = exponential_moving_average(closes, self.strategy_config.fast_ema_period)
-        slow_ema = exponential_moving_average(closes, self.strategy_config.slow_ema_period)
-        rsi_values = relative_strength_index(closes, self.strategy_config.rsi_period)
-        atr_values = average_true_range(highs, lows, closes, self.strategy_config.atr_period)
-        breakout_highs = rolling_high(closes, self.strategy_config.breakout_lookback)
-        breakout_lows = rolling_low(closes, self.strategy_config.breakout_lookback)
-
         latest_index = len(candles) - 1
-        close_price = closes[-1]
-        fast_value = fast_ema[-1]
-        slow_value = slow_ema[-1]
-        rsi_value = rsi_values[-1]
-        atr_value = atr_values[-1]
-        prior_high = breakout_highs[-1]
-        prior_low = breakout_lows[-1]
-        if None in {fast_value, slow_value, rsi_value, atr_value, prior_high, prior_low}:
+        factors = compute_factor_series(candles, self.strategy_config)
+        latest_factors = factors.latest()
+        if not latest_factors.is_ready():
             return Signal(SignalAction.HOLD, "indicators warming up")
 
+        close_price = latest_factors.close
+        fast_value = latest_factors.fast_ema
+        slow_value = latest_factors.slow_ema
+        rsi_value = latest_factors.rsi
+        atr_value = latest_factors.atr
+        breakout_high = latest_factors.breakout_high
+        breakout_low = latest_factors.breakout_low
         assert fast_value is not None
         assert slow_value is not None
         assert rsi_value is not None
         assert atr_value is not None
-        assert prior_high is not None
-        assert prior_low is not None
+        assert breakout_high is not None
+        assert breakout_low is not None
 
         if open_position is not None:
             return self._exit_signal(open_position, close_price, fast_value, slow_value, rsi_value)
@@ -70,7 +62,7 @@ class SwingPerpsStrategy:
         stop_distance = self._bounded_stop_distance(close_price, atr_value)
 
         long_rsi_ok = self.strategy_config.long_min_rsi <= rsi_value <= self.strategy_config.long_max_rsi
-        if trend_up and close_price > prior_high and long_rsi_ok:
+        if trend_up and close_price > breakout_high and long_rsi_ok:
             return Signal(
                 action=SignalAction.OPEN,
                 side=Side.LONG,
@@ -82,7 +74,7 @@ class SwingPerpsStrategy:
             )
 
         short_rsi_ok = self.strategy_config.short_min_rsi <= rsi_value <= self.strategy_config.short_max_rsi
-        if trend_down and close_price < prior_low and short_rsi_ok:
+        if trend_down and close_price < breakout_low and short_rsi_ok:
             return Signal(
                 action=SignalAction.OPEN,
                 side=Side.SHORT,

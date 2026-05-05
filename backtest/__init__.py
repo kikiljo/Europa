@@ -1,1 +1,1 @@
-"""Backtesting helpers for the SOL perps strategy."""
+"""Backtesting helpers for Jupiter perps strategies."""

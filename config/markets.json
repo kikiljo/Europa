@@ -1,0 +1,53 @@
+{
+  "default_market": "SOL",
+  "markets": {
+    "SOL": {
+      "asset": "SOL",
+      "symbol": "SOL/USD",
+      "instrument": "SOL-PERP",
+      "candle_interval": "30m",
+      "price_source": "pyth",
+      "price_mint": "So11111111111111111111111111111111111111112",
+      "data_path": "data/sol_usd_30m.csv",
+      "history": {
+        "coinbase_product": "SOL-USD",
+        "kraken_pair": "SOLUSD",
+        "binance_symbol": "SOLUSDT",
+        "pyth_symbol": "Crypto.SOL/USD",
+        "pyth_price_id": "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d"
+      }
+    },
+    "BTC": {
+      "asset": "BTC",
+      "symbol": "BTC/USD",
+      "instrument": "BTC-PERP",
+      "candle_interval": "30m",
+      "price_source": "pyth",
+      "price_mint": "",
+      "data_path": "data/btc_usd_30m.csv",
+      "history": {
+        "coinbase_product": "BTC-USD",
+        "kraken_pair": "XBTUSD",
+        "binance_symbol": "BTCUSDT",
+        "pyth_symbol": "Crypto.BTC/USD",
+        "pyth_price_id": "e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43"
+      }
+    },
+    "ETH": {
+      "asset": "ETH",
+      "symbol": "ETH/USD",
+      "instrument": "ETH-PERP",
+      "candle_interval": "30m",
+      "price_source": "pyth",
+      "price_mint": "",
+      "data_path": "data/eth_usd_30m.csv",
+      "history": {
+        "coinbase_product": "ETH-USD",
+        "kraken_pair": "ETHUSD",
+        "binance_symbol": "ETHUSDT",
+        "pyth_symbol": "Crypto.ETH/USD",
+        "pyth_price_id": "ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace"
+      }
+    }
+  }
+}
