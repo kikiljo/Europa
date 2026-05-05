@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from trading.config import StrategyConfig
+from trading.domain import Candle
 from trading.indicators import average_true_range, exponential_moving_average, relative_strength_index, rolling_high, rolling_low
-from trading.models import Candle
 
 
 MaybeFloat = float | None
@@ -47,6 +47,13 @@ class FactorSeries:
     atr: list[MaybeFloat]
     breakout_high: list[MaybeFloat]
     breakout_low: list[MaybeFloat]
+
+    def values_for(self, name: str) -> list[MaybeFloat]:
+        field_name = {"close": "closes", "high": "highs", "low": "lows", "mid": "mids"}.get(name, name)
+        values = getattr(self, field_name, None)
+        if values is None:
+            raise KeyError(f"unknown factor series '{name}'")
+        return list(values)
 
     def latest(self) -> FactorSnapshot:
         if not self.closes:

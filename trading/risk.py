@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from trading.config import RiskConfig, StrategyConfig
-from trading.models import OrderIntent, Position, Side, Signal, SignalAction
+from trading.domain import OrderIntent, Position, Side, Signal, SignalAction
 
 
 class RiskError(RuntimeError):

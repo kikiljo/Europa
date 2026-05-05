@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from trading.config import WRAPPED_SOL_MINT
-from trading.models import Candle
+from trading.domain import Candle
 
 
 CANDLE_FIELDS = ["ts", "open", "high", "low", "close", "volume"]

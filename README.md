@@ -61,6 +61,28 @@ python -m trading plot --market SOL
 
 The chart is written to `reports/sol_mid_price.html` by default. With the current OHLCV schema, `mid` is derived as `(high + low) / 2`; true bid/ask midpoint would require storing bid and ask fields in a future schema version.
 
+Generate a fuller analysis report with data metadata, backtest summary, latest strategy signal, factor snapshot, normalized factor/model signals, signal distributions, and forward-return correlations:
+
+```powershell
+python -m trading analyze --market SOL
+```
+
+Customize the forward-return correlation horizons and factor signals shown in the report:
+
+```powershell
+python -m trading analyze --market SOL --horizons 1,2,4,8,16 --factor-signals fast_ema,slow_ema,rsi,atr
+```
+
+The report is written to `reports/sol_analysis.html` by default. `reports/` is ignored by git because these files are generated local artifacts.
+
+Build the baseline model training dataset and print the training scaffold summary:
+
+```powershell
+python -m trading train-model --market SOL --target-horizon 4
+```
+
+The first model layer is intentionally simple: `models/config.py` defines the model shape and target horizon, `models/training.py` builds normalized factor features plus forward-return targets, and `models/baseline.py` emits a baseline factor-ensemble signal. A fitted ML model can plug into the same shape later.
+
 Collect one live price sample from the market's configured source and update the same canonical candle CSV. The default configured source is Pyth/Hermes:
 
 ```powershell
@@ -104,11 +126,15 @@ Each CSV has a sidecar metadata file named `<dataset>.meta.json` with `schema=ma
 ## Files
 
 - `config/markets.json`: market definitions for Jupiter Perps assets, candle intervals, Pyth feed ids, and fallback history-source symbols.
+- `factors/`: reusable factor repository and factor library that turn candles into factor series, latest snapshots, and normalized factor signals.
+- `models/`: model signal generators, model shape config, training dataset builder, and the first baseline factor ensemble.
+- `trading/analysis.py`: HTML analysis reports combining data metadata, factor/model signals, forward-return correlations, backtest summary, latest strategy signal, and charts.
 - `trading/config.py`: environment-backed and market-backed configuration.
 - `trading/data.py`: Pyth/Hermes and Jupiter Price API sampling, Coinbase/Kraken/Binance/Pyth history fetchers, and canonical CSV utilities.
-- `trading/plotting.py`: Plotly HTML charts for mid price, candles, EMAs, and candle range.
+- `trading/domain.py`: shared trading dataclasses and enums such as `Candle`, `Signal`, `Position`, and `OrderIntent`.
+- `trading/plotting.py`: Plotly HTML charts for mid price, candles, EMAs, normalized signals, signal distributions, and correlation heatmaps.
 - `trading/indicators.py`: low-level EMA, RSI, ATR, and rolling breakout helpers.
-- `trading/factors.py`: reusable factor library that turns candles into factor series and latest snapshots.
+- `trading/signals.py`: shared research signal normalization, summaries, forward returns, and correlation helpers.
 - `trading/strategy.py`: medium-slow swing signal logic built from the factor library.
 - `trading/risk.py`: weekly caps, daily loss guard, leverage, and size calculation.
 - `trading/broker.py`: dry-run broker and Jupiter CLI perps adapter.

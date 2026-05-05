@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
+from factors import compute_factor_series
+from models import ModelShapeConfig, TrainingConfig, train_baseline_model
 from backtest.engine import BacktestEngine
+from trading.analysis import default_analysis_report_path, parse_factor_names, parse_horizons, write_analysis_report
 from trading.broker import DryRunBroker, JupiterCliPerpsBroker
 from trading.config import AppConfig, DEFAULT_MARKETS_PATH, ExecutionConfig, PROJECT_ROOT
 from trading.data import (
@@ -23,7 +26,7 @@ from trading.data import (
     update_canonical_with_price,
     write_dataset,
 )
-from trading.models import ExecutionReport, OrderIntent, Position, SignalAction
+from trading.domain import ExecutionReport, OrderIntent, Position, SignalAction
 from trading.plotting import default_plot_path, load_meta_for_chart, write_mid_price_chart
 from trading.risk import RiskError, RiskManager
 from trading.storage import append_trade_log, count_weekly_open_trades, daily_realized_pnl, load_position, save_position
@@ -46,6 +49,10 @@ def main() -> None:
         print_signal(args, config)
     elif args.command == "plot":
         plot_mid_price(args, config)
+    elif args.command == "analyze":
+        analyze_market(args, config)
+    elif args.command == "train-model":
+        train_model(args, config)
     elif args.command == "run-once":
         run_once(args, config)
     elif args.command == "positions":
@@ -102,6 +109,18 @@ def build_parser() -> argparse.ArgumentParser:
     plot_parser.add_argument("--out", type=Path, default=None)
     plot_parser.add_argument("--no-candles", action="store_true", help="hide OHLC candles and show only mid-price lines")
     plot_parser.add_argument("--no-ema", action="store_true", help="hide EMA overlays")
+
+    analyze_parser = subparsers.add_parser("analyze", parents=[common_parser], help="write an HTML analysis report with factors, backtest, and chart")
+    analyze_parser.add_argument("--data", type=Path, default=None)
+    analyze_parser.add_argument("--out", type=Path, default=None)
+    analyze_parser.add_argument("--horizons", default=None, help="comma-separated forward sampling ticks for correlation, e.g. 1,2,4,8,16")
+    analyze_parser.add_argument("--factor-signals", default=None, help="comma-separated factor names to include as signals")
+
+    train_parser = subparsers.add_parser("train-model", parents=[common_parser], help="build the baseline model training dataset and print a training scaffold summary")
+    train_parser.add_argument("--data", type=Path, default=None)
+    train_parser.add_argument("--target-horizon", type=int, default=4, help="forward sampling ticks used as the training target")
+    train_parser.add_argument("--train-fraction", type=float, default=0.70)
+    train_parser.add_argument("--min-samples", type=int, default=200)
 
     run_parser = subparsers.add_parser("run-once", parents=[common_parser], help="evaluate one decision and optionally send it to Jupiter CLI")
     run_parser.add_argument("--data", type=Path, default=None)
@@ -272,6 +291,36 @@ def plot_mid_price(args: argparse.Namespace, config: AppConfig) -> None:
         include_ema=not args.no_ema,
     )
     print(json.dumps({"written": str(written), "candles": len(candles), "mid_definition": "(high + low) / 2"}, indent=2))
+
+
+def analyze_market(args: argparse.Namespace, config: AppConfig) -> None:
+    data_path = data_path_from_args(args, config)
+    output_path = args.out or (PROJECT_ROOT / default_analysis_report_path(config.strategy.market))
+    candles = load_candles(data_path)
+    if not candles:
+        raise SystemExit(f"no candles found at {data_path}")
+    written = write_analysis_report(
+        candles,
+        output_path,
+        config=config,
+        data_path=data_path,
+        meta=load_meta_for_chart(data_path),
+        horizons=parse_horizons(args.horizons),
+        factor_names=parse_factor_names(args.factor_signals),
+    )
+    print(json.dumps({"written": str(written), "candles": len(candles)}, indent=2))
+
+
+def train_model(args: argparse.Namespace, config: AppConfig) -> None:
+    data_path = data_path_from_args(args, config)
+    candles = load_candles(data_path)
+    if not candles:
+        raise SystemExit(f"no candles found at {data_path}")
+    shape = ModelShapeConfig(target_horizon_ticks=args.target_horizon)
+    training_config = TrainingConfig(shape=shape, train_fraction=args.train_fraction, min_samples=args.min_samples)
+    factors = compute_factor_series(candles, config.strategy)
+    result = train_baseline_model(candles, factors, training_config)
+    print(json.dumps(asdict(result), indent=2, default=str))
 
 
 def run_once(args: argparse.Namespace, config: AppConfig) -> None:

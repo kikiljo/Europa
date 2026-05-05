@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 from trading.config import ExecutionConfig
-from trading.models import ExecutionReport, OrderIntent, SignalAction
+from trading.domain import ExecutionReport, OrderIntent, SignalAction
 
 
 class Broker(ABC):

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from trading.config import RiskConfig, StrategyConfig
-from trading.models import BacktestTrade, Candle, Position, SignalAction
+from trading.domain import BacktestTrade, Candle, Position, SignalAction
 from trading.risk import RiskError, RiskManager, iso_week_key
 from trading.strategy import SwingPerpsStrategy
 

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from trading.config import RiskConfig, StrategyConfig
-from trading.factors import compute_factor_series
-from trading.models import Candle, Position, Side, Signal, SignalAction
+from factors import compute_factor_series
+from trading.domain import Candle, Position, Side, Signal, SignalAction
 
 
 class SwingPerpsStrategy:

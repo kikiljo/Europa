@@ -12,16 +12,28 @@ Europa/
 	data/
 		README.md                # data folder overview
 		SCHEMA.md                # marketdata.v1 CSV and metadata contract
+	factors/                   # research factor library
+		__init__.py                # public factor library exports
+		core.py                    # factor series computation
+		repository.py              # factor definitions and repository
+		signals.py                 # factor series converted into normalized research signals
+	models/                    # model signal generators, shape config, and training framework
+		__init__.py                # public model exports
+		baseline.py                # baseline factor ensemble model signal
+		config.py                  # model shape and training configuration
+		training.py                # training dataset and baseline training scaffold
+	reports/                  # generated local HTML reports, ignored by git
 	trading/
+		analysis.py              # generated analysis reports with factors, model signals, correlations, backtest, and charts
 		broker.py                # dry-run broker and Jupiter CLI adapter
 		cli.py                   # command-line interface
 		config.py                # environment-backed and market-backed settings
 		data.py                  # Pyth/Hermes, Jupiter Price API, history fetchers, and CSV helpers
-		factors.py               # reusable factor series and latest factor snapshots
+		domain.py                # shared trading dataclasses and enums
 		indicators.py            # EMA, RSI, ATR, rolling levels
-		models.py                # shared dataclasses and enums
-		plotting.py              # Plotly mid-price chart generation
+		plotting.py              # Plotly price, signal, distribution, and correlation charts
 		risk.py                  # trade caps, leverage, and position sizing
+		signals.py               # normalized research signals and forward-return correlation helpers
 		storage.py               # logs and persisted open-position state
 		strategy.py              # medium-slow swing signal logic
 ```

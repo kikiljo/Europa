@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from trading.models import ExecutionReport, OrderIntent, Position, SignalAction
+from trading.domain import ExecutionReport, OrderIntent, Position, SignalAction
 from trading.risk import iso_week_key
 
 

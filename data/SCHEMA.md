@@ -74,4 +74,4 @@ The executable definition lives in `trading/data.py`:
 - `write_dataset`
 - `load_dataset_meta`
 
-The candle row serializer/parser lives in `trading/models.py` as `Candle.to_csv_row()` and `Candle.from_mapping()`.
+The candle row serializer/parser lives in `trading/domain.py` as `Candle.to_csv_row()` and `Candle.from_mapping()`.
