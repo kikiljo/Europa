@@ -10,7 +10,7 @@ from factors import compute_factor_series
 from models import ModelShapeConfig, TrainingConfig, train_baseline_model
 from backtest.engine import BacktestEngine
 from trading.analysis import default_analysis_report_path, parse_factor_names, parse_horizons, write_analysis_report
-from trading.broker import DryRunBroker, JupiterCliPerpsBroker
+from trading.broker import JupiterCliPerpsBroker
 from trading.config import AppConfig, DEFAULT_MARKETS_PATH, ExecutionConfig, PROJECT_ROOT
 from trading.data import (
     JupiterPriceClient,
@@ -26,10 +26,9 @@ from trading.data import (
     update_canonical_with_price,
     write_dataset,
 )
-from trading.domain import ExecutionReport, OrderIntent, Position, SignalAction
+from trading.executor import LiveTradingExecutor
 from trading.plotting import default_plot_path, load_meta_for_chart, write_mid_price_chart
-from trading.risk import RiskError, RiskManager
-from trading.storage import append_trade_log, count_weekly_open_trades, daily_realized_pnl, load_position, save_position
+from trading.storage import count_weekly_open_trades, load_position
 from trading.strategy import SwingPerpsStrategy
 
 
@@ -110,11 +109,16 @@ def build_parser() -> argparse.ArgumentParser:
     plot_parser.add_argument("--no-candles", action="store_true", help="hide OHLC candles and show only mid-price lines")
     plot_parser.add_argument("--no-ema", action="store_true", help="hide EMA overlays")
 
-    analyze_parser = subparsers.add_parser("analyze", parents=[common_parser], help="write an HTML analysis report with factors, backtest, and chart")
+    analyze_parser = subparsers.add_parser("analyze", parents=[common_parser], help="write an HTML factor signal analysis report")
     analyze_parser.add_argument("--data", type=Path, default=None)
     analyze_parser.add_argument("--out", type=Path, default=None)
-    analyze_parser.add_argument("--horizons", default=None, help="comma-separated forward sampling ticks for correlation, e.g. 1,2,4,8,16")
+    analyze_parser.add_argument("--interval", default=None, help="analyze a non-default dataset interval, e.g. 15m uses data/<market>_usd_15m.csv when --data is omitted")
+    analyze_parser.add_argument("--horizons", default=None, help="forward sampling ticks for correlation, e.g. 1-240 or 1,2,4,8,16")
     analyze_parser.add_argument("--factor-signals", default=None, help="comma-separated factor names to include as signals")
+    analyze_parser.add_argument("--round-trip-cost-bps", type=float, default=None, help="round-trip trading cost in bps; defaults to 2 * TRADER_FEE_BPS")
+    analyze_parser.add_argument("--hourly-cost-bps", type=float, default=0.0, help="estimated carry/funding cost in bps per hour")
+    analyze_parser.add_argument("--tail-fraction", type=float, default=0.01, help="tail fraction for large-signal event analysis, e.g. 0.01 = top/bottom 1%%")
+    analyze_parser.add_argument("--tail-lookback-ticks", type=int, default=48, help="lookback ticks used to describe market state around tail events")
 
     train_parser = subparsers.add_parser("train-model", parents=[common_parser], help="build the baseline model training dataset and print a training scaffold summary")
     train_parser.add_argument("--data", type=Path, default=None)
@@ -134,6 +138,22 @@ def build_parser() -> argparse.ArgumentParser:
 def data_path_from_args(args: argparse.Namespace, config: AppConfig, attr: str = "data") -> Path:
     path = getattr(args, attr, None)
     return path if path is not None else config.strategy.data_path
+
+
+def analysis_data_path_from_args(args: argparse.Namespace, config: AppConfig, interval_minutes: int | None) -> Path:
+    if args.data is not None:
+        return args.data
+    if interval_minutes is None:
+        return config.strategy.data_path
+    interval_text = interval_string_from_minutes(interval_minutes)
+    return PROJECT_ROOT / "data" / f"{config.strategy.market.lower()}_usd_{interval_text}.csv"
+
+
+def default_analysis_output_path(market: str, interval_minutes: int | None) -> Path:
+    if interval_minutes is None:
+        return PROJECT_ROOT / default_analysis_report_path(market)
+    interval_text = interval_string_from_minutes(interval_minutes)
+    return PROJECT_ROOT / "reports" / f"{market.lower()}_{interval_text}_analysis.html"
 
 
 def interval_minutes_from_args(args: argparse.Namespace, config: AppConfig) -> int:
@@ -294,8 +314,9 @@ def plot_mid_price(args: argparse.Namespace, config: AppConfig) -> None:
 
 
 def analyze_market(args: argparse.Namespace, config: AppConfig) -> None:
-    data_path = data_path_from_args(args, config)
-    output_path = args.out or (PROJECT_ROOT / default_analysis_report_path(config.strategy.market))
+    interval_minutes = parse_interval_minutes(args.interval) if args.interval else None
+    data_path = analysis_data_path_from_args(args, config, interval_minutes)
+    output_path = args.out or default_analysis_output_path(config.strategy.market, interval_minutes)
     candles = load_candles(data_path)
     if not candles:
         raise SystemExit(f"no candles found at {data_path}")
@@ -307,6 +328,11 @@ def analyze_market(args: argparse.Namespace, config: AppConfig) -> None:
         meta=load_meta_for_chart(data_path),
         horizons=parse_horizons(args.horizons),
         factor_names=parse_factor_names(args.factor_signals),
+        round_trip_cost_bps=args.round_trip_cost_bps,
+        hourly_cost_bps=args.hourly_cost_bps,
+        tail_fraction=args.tail_fraction,
+        tail_lookback_ticks=args.tail_lookback_ticks,
+        candle_minutes=interval_minutes,
     )
     print(json.dumps({"written": str(written), "candles": len(candles)}, indent=2))
 
@@ -335,51 +361,34 @@ def run_once(args: argparse.Namespace, config: AppConfig) -> None:
     if args.paper:
         execution_config = replace(execution_config, dry_run=True)
 
-    now = datetime.now(timezone.utc)
-    open_position = load_position(execution_config.state_path)
-    weekly_count = count_weekly_open_trades(execution_config.trade_log_path, now)
-    daily_pnl = daily_realized_pnl(execution_config.trade_log_path, now)
-    strategy = SwingPerpsStrategy(config.strategy, config.risk)
-    risk_manager = RiskManager(config.strategy, config.risk)
-    signal = strategy.analyze(candles, open_position, weekly_count)
-
-    try:
-        order = risk_manager.order_from_signal(signal, candles[-1].timestamp, weekly_count, daily_pnl, open_position)
-    except RiskError as exc:
-        print(json.dumps({"signal": signal.__dict__, "blocked": str(exc)}, indent=2, default=str))
-        return
-    if order is None:
-        print(json.dumps({"signal": signal.__dict__, "order": None}, indent=2, default=str))
-        return
-
-    broker = DryRunBroker() if execution_config.dry_run else JupiterCliPerpsBroker(execution_config)
-    report = broker.execute(order)
-    realized_pnl = 0.0
-    if order.action == SignalAction.CLOSE and open_position is not None:
-        realized_pnl = open_position.unrealized_pnl_usd(candles[-1].close)
-    append_trade_log(execution_config.trade_log_path, order, report, realized_pnl)
-    update_state_after_execution(execution_config, order, report, candles[-1].timestamp)
-    print(json.dumps({"signal": signal.__dict__, "order": order.__dict__, "report": report.__dict__}, indent=2, default=str))
-
-
-def update_state_after_execution(execution_config: ExecutionConfig, order: OrderIntent, report: ExecutionReport, opened_at: datetime) -> None:
-    if not report.accepted:
-        return
-    if order.action == SignalAction.OPEN:
-        position = Position(
-            side=order.side,
-            entry_price=order.entry_price or 0.0,
-            size_usd=order.size_usd,
-            collateral_usd=order.collateral_usd,
-            leverage=order.leverage,
-            opened_at=opened_at,
-            stop_loss=order.stop_loss or 0.0,
-            take_profit=order.take_profit or 0.0,
-            position_id=report.position_id,
+    executor = LiveTradingExecutor.from_config(config, execution_config)
+    result = executor.run_once(candles)
+    print(
+        json.dumps(
+            {
+                "signal": result.inference.signal.__dict__,
+                "model_signals": [_research_signal_summary(signal) for signal in result.inference.model_signals],
+                "factor_ready": result.inference.factor_ready,
+                "order": result.decision.order.__dict__ if result.decision.order else None,
+                "blocked": result.decision.blocked_reason,
+                "report": result.report.__dict__ if result.report else None,
+            },
+            indent=2,
+            default=str,
         )
-        save_position(execution_config.state_path, position)
-    elif order.action == SignalAction.CLOSE:
-        save_position(execution_config.state_path, None)
+    )
+
+
+def _research_signal_summary(signal: object) -> dict[str, object]:
+    latest_value = signal.latest_value() if hasattr(signal, "latest_value") else None
+    return {
+        "name": getattr(signal, "name", ""),
+        "label": getattr(signal, "label", ""),
+        "source": getattr(signal, "source", ""),
+        "group": getattr(signal, "group", ""),
+        "latest": latest_value,
+        "normalization": getattr(signal, "normalization", ""),
+    }
 
 
 def print_positions(execution_config: ExecutionConfig) -> None:

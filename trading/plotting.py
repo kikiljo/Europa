@@ -9,7 +9,7 @@ from trading.config import StrategyConfig
 from trading.data import DatasetMeta, load_dataset_meta
 from trading.domain import Candle
 from trading.indicators import exponential_moving_average
-from trading.signals import CorrelationResult, ResearchSignal
+from trading.signals import CorrelationResult, DecileSpreadResult, ResearchSignal, TailEventPoint
 
 
 def default_plot_path(market: str) -> Path:
@@ -224,6 +224,142 @@ def build_signal_distribution_figure(signals: list[ResearchSignal], *, title: st
         margin={"l": 56, "r": 24, "t": 76, "b": 48},
         height=520,
     )
+    return figure
+
+
+def build_signal_decay_figure(
+    correlations: list[CorrelationResult],
+    decile_comparisons: list[DecileSpreadResult],
+    *,
+    cost_price_by_horizon: dict[int, float],
+    candle_minutes: int,
+    title: str,
+) -> go.Figure:
+    labels = _unique_ordered([result.signal_label for result in correlations])
+    horizons = _unique_ordered([result.horizon for result in correlations])
+    correlation_by_key = {(result.signal_label, result.horizon): result.correlation for result in correlations}
+    directional_mean_by_key = {(result.signal_label, result.horizon): result.mean_value for result in decile_comparisons}
+    palette = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#f97316", "#0891b2", "#4b5563", "#be123c"]
+
+    figure = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        row_heights=[0.52, 0.48],
+        vertical_spacing=0.08,
+        subplot_titles=("Signal vs Forward Price Move Correlation", "Signal-Aligned Tail Price Move"),
+    )
+
+    for index, label in enumerate(labels):
+        color = palette[index % len(palette)]
+        figure.add_trace(
+            go.Scatter(
+                x=horizons,
+                y=[correlation_by_key.get((label, horizon)) for horizon in horizons],
+                mode="lines",
+                name=label,
+                legendgroup=label,
+                line={"color": color, "width": 1.8},
+                hovertemplate="horizon=%{x} ticks<br>corr=%{y:.4f}<extra></extra>",
+            ),
+            row=1,
+            col=1,
+        )
+        figure.add_trace(
+            go.Scatter(
+                x=horizons,
+                y=[directional_mean_by_key.get((label, horizon)) for horizon in horizons],
+                mode="lines",
+                name=f"{label} directional move",
+                legendgroup=label,
+                showlegend=False,
+                line={"color": color, "width": 1.5},
+                hovertemplate="horizon=%{x} ticks<br>signal-aligned move=%{y:.4f}<extra></extra>",
+            ),
+            row=2,
+            col=1,
+        )
+
+    cost_horizons = [horizon for horizon in horizons if horizon in cost_price_by_horizon]
+    cost_values = [cost_price_by_horizon[horizon] for horizon in cost_horizons]
+    if cost_values:
+        figure.add_trace(
+            go.Scatter(
+                x=cost_horizons,
+                y=cost_values,
+                mode="lines",
+                name="estimated cost",
+                line={"color": "#111827", "width": 1.3, "dash": "dot"},
+                hovertemplate="horizon=%{x} ticks<br>cost price=%{y:.4f}<extra></extra>",
+            ),
+            row=2,
+            col=1,
+        )
+
+    figure.update_layout(
+        title={"text": title, "x": 0.02, "xanchor": "left"},
+        template="plotly_white",
+        hovermode="x unified",
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "right", "x": 1},
+        margin={"l": 64, "r": 28, "t": 82, "b": 54},
+        height=780,
+    )
+    figure.update_yaxes(title_text="Correlation", zeroline=True, zerolinecolor="#94a3b8", row=1, col=1)
+    figure.update_yaxes(title_text="Signal-Aligned Forward Price Move", zeroline=True, zerolinecolor="#94a3b8", row=2, col=1)
+    figure.update_xaxes(title_text=f"Forward Horizon Ticks ({candle_minutes}m each)", row=2, col=1)
+    return figure
+
+
+def build_tail_event_price_figure(candles: list[Candle], tail_events: list[TailEventPoint], *, title: str) -> go.Figure:
+    if not candles:
+        raise ValueError("cannot plot tail events for an empty candle series")
+
+    timestamps = [candle.timestamp for candle in candles]
+    mids = [(candle.high + candle.low) / 2 for candle in candles]
+    figure = go.Figure()
+    figure.add_trace(
+        go.Scatter(
+            x=timestamps,
+            y=mids,
+            mode="lines",
+            name="Mid (H+L)/2",
+            line={"color": "#111827", "width": 1.3},
+            hovertemplate="%{x}<br>mid=%{y:.4f}<extra></extra>",
+        )
+    )
+
+    grouped_events: dict[tuple[str, str], list[TailEventPoint]] = {}
+    for event in tail_events:
+        grouped_events.setdefault((event.signal_label, event.tail), []).append(event)
+
+    tail_styles = {
+        "top": {"color": "#16a34a", "symbol": "triangle-up"},
+        "bottom": {"color": "#dc2626", "symbol": "triangle-down"},
+    }
+    for (label, tail), events in grouped_events.items():
+        style = tail_styles.get(tail, {"color": "#2563eb", "symbol": "circle"})
+        figure.add_trace(
+            go.Scatter(
+                x=[timestamps[event.timestamp_index] for event in events],
+                y=[mids[event.timestamp_index] for event in events],
+                mode="markers",
+                name=f"{label} {tail} tail",
+                marker={"color": style["color"], "symbol": style["symbol"], "size": 7, "opacity": 0.72},
+                customdata=[event.signal_value for event in events],
+                hovertemplate="%{x}<br>mid=%{y:.4f}<br>signal=%{customdata:.4f}<extra></extra>",
+            )
+        )
+
+    figure.update_layout(
+        title={"text": title, "x": 0.02, "xanchor": "left"},
+        template="plotly_white",
+        hovermode="closest",
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "right", "x": 1},
+        margin={"l": 56, "r": 24, "t": 76, "b": 48},
+        height=680,
+    )
+    figure.update_yaxes(title_text="Price")
+    figure.update_xaxes(showspikes=True, spikemode="across", spikesnap="cursor")
     return figure
 
 

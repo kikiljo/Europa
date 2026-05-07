@@ -24,16 +24,21 @@ Europa/
 		training.py                # training dataset and baseline training scaffold
 	reports/                  # generated local HTML reports, ignored by git
 	trading/
-		analysis.py              # generated analysis reports with factors, model signals, correlations, backtest, and charts
+		analysis.py              # factor signal reports with price-move decay, tail events, and cost curves
+		algo.py                  # live trading algorithm decisions and risk-checked order intents
 		broker.py                # dry-run broker and Jupiter CLI adapter
 		cli.py                   # command-line interface
 		config.py                # environment-backed and market-backed settings
 		data.py                  # Pyth/Hermes, Jupiter Price API, history fetchers, and CSV helpers
 		domain.py                # shared trading dataclasses and enums
+		executor.py              # live runtime executor orchestration
+		gateway.py               # local gateway boundary to venue/API behavior
 		indicators.py            # EMA, RSI, ATR, rolling levels
-		plotting.py              # Plotly price, signal, distribution, and correlation charts
+		inference.py             # lightweight live factor/model/strategy inference
+		parser.py                # real-time market payload parser interfaces
+		plotting.py              # Plotly price, signal distribution, signal-aligned decay, and tail-event charts
 		risk.py                  # trade caps, leverage, and position sizing
-		signals.py               # normalized research signals and forward-return correlation helpers
+		signals.py               # expanding-normalized research signals, tail-event, and forward-price-change helpers
 		storage.py               # logs and persisted open-position state
 		strategy.py              # medium-slow swing signal logic
 ```

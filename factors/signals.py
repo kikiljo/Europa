@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from factors.core import FactorSeries
 from factors.repository import FactorRepository, default_factor_repository
-from trading.signals import ResearchSignal, zscore_normalize
+from trading.signals import ResearchSignal, expanding_zscore_normalize
 
 
 DEFAULT_FACTOR_SIGNAL_NAMES = ["fast_ema", "slow_ema", "rsi", "atr", "breakout_high", "breakout_low"]
@@ -30,9 +30,9 @@ def build_factor_signals(
                 source="factor",
                 group=definition.group,
                 raw_values=raw_values,
-                values=zscore_normalize(raw_values),
+                values=expanding_zscore_normalize(raw_values),
                 description=definition.description,
-                normalization="zscore",
+                normalization="expanding_zscore_30",
             )
         )
     return signals

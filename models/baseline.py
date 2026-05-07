@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from factors import FactorSeries
 from models.config import ModelShapeConfig
 from trading.domain import Candle
-from trading.signals import ResearchSignal, zscore_normalize
+from trading.signals import ResearchSignal, expanding_zscore_normalize
 
 
 @dataclass(frozen=True)
@@ -27,9 +27,9 @@ class BaselineSignalModel:
         rsi_raw = _rsi_centered(factors)
         breakout_raw = _breakout_position(factors)
 
-        trend_signal = zscore_normalize(trend_raw)
+        trend_signal = expanding_zscore_normalize(trend_raw)
         rsi_signal = rsi_raw
-        breakout_signal = zscore_normalize(breakout_raw)
+        breakout_signal = expanding_zscore_normalize(breakout_raw)
         score = _weighted_score(
             components=[
                 (trend_signal, self.shape.trend_weight),
@@ -37,7 +37,7 @@ class BaselineSignalModel:
                 (breakout_signal, self.shape.breakout_weight),
             ]
         )
-        normalized_score = zscore_normalize(score)
+        normalized_score = expanding_zscore_normalize(score)
 
         return ModelSignalOutput(
             model_name=self.name,
@@ -51,7 +51,7 @@ class BaselineSignalModel:
                     raw_values=score,
                     values=normalized_score,
                     description="Weighted directional score from trend spread, RSI, and breakout position.",
-                    normalization="zscore",
+                    normalization="expanding_zscore_30",
                 )
             ],
         )
