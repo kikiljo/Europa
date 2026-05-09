@@ -5,7 +5,15 @@ from factors.repository import FactorRepository, default_factor_repository
 from trading.signals import ResearchSignal, expanding_zscore_normalize
 
 
-DEFAULT_FACTOR_SIGNAL_NAMES = ["fast_ema", "slow_ema", "rsi", "atr", "breakout_high", "breakout_low"]
+DEFAULT_FACTOR_SIGNAL_NAMES = [
+    "fast_ema_slope",
+    "slow_ema_slope",
+    "ema_spread",
+    "price_vs_slow_ema",
+    "rsi_momentum",
+    "rsi_reversion",
+    "rsi_slope",
+]
 
 
 def build_factor_signals(

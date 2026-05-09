@@ -24,7 +24,7 @@ Europa/
 		training.py                # training dataset and baseline training scaffold
 	reports/                  # generated local HTML reports, ignored by git
 	trading/
-		analysis.py              # factor signal reports with price-move decay, tail events, and cost curves
+		analysis.py              # factor signal reports with signal-aligned price-move decay, tail events, and cost curves
 		algo.py                  # live trading algorithm decisions and risk-checked order intents
 		broker.py                # dry-run broker and Jupiter CLI adapter
 		cli.py                   # command-line interface

@@ -228,17 +228,17 @@ def build_signal_distribution_figure(signals: list[ResearchSignal], *, title: st
 
 
 def build_signal_decay_figure(
-    correlations: list[CorrelationResult],
+    tail_correlations: list[CorrelationResult],
     decile_comparisons: list[DecileSpreadResult],
     *,
     cost_price_by_horizon: dict[int, float],
     candle_minutes: int,
     title: str,
 ) -> go.Figure:
-    labels = _unique_ordered([result.signal_label for result in correlations])
-    horizons = _unique_ordered([result.horizon for result in correlations])
-    correlation_by_key = {(result.signal_label, result.horizon): result.correlation for result in correlations}
-    directional_mean_by_key = {(result.signal_label, result.horizon): result.mean_value for result in decile_comparisons}
+    labels = _unique_ordered([result.signal_label for result in tail_correlations])
+    horizons = _unique_ordered([result.horizon for result in tail_correlations])
+    tail_correlation_by_key = {(result.signal_label, result.horizon): result.correlation for result in tail_correlations}
+    tail_mean_by_key = {(result.signal_label, result.horizon): result.mean_value for result in decile_comparisons}
     palette = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#f97316", "#0891b2", "#4b5563", "#be123c"]
 
     figure = make_subplots(
@@ -247,7 +247,7 @@ def build_signal_decay_figure(
         shared_xaxes=True,
         row_heights=[0.52, 0.48],
         vertical_spacing=0.08,
-        subplot_titles=("Signal vs Forward Price Move Correlation", "Signal-Aligned Tail Price Move"),
+        subplot_titles=("Extreme Tails Signal vs Price Move Correlation", "Extreme Tails Signal-Aligned Price Move"),
     )
 
     for index, label in enumerate(labels):
@@ -255,12 +255,12 @@ def build_signal_decay_figure(
         figure.add_trace(
             go.Scatter(
                 x=horizons,
-                y=[correlation_by_key.get((label, horizon)) for horizon in horizons],
+                y=[tail_correlation_by_key.get((label, horizon)) for horizon in horizons],
                 mode="lines",
                 name=label,
                 legendgroup=label,
                 line={"color": color, "width": 1.8},
-                hovertemplate="horizon=%{x} ticks<br>corr=%{y:.4f}<extra></extra>",
+                hovertemplate="horizon=%{x} ticks<br>tail corr=%{y:.4f}<extra></extra>",
             ),
             row=1,
             col=1,
@@ -268,13 +268,13 @@ def build_signal_decay_figure(
         figure.add_trace(
             go.Scatter(
                 x=horizons,
-                y=[directional_mean_by_key.get((label, horizon)) for horizon in horizons],
+                y=[tail_mean_by_key.get((label, horizon)) for horizon in horizons],
                 mode="lines",
                 name=f"{label} directional move",
                 legendgroup=label,
                 showlegend=False,
                 line={"color": color, "width": 1.5},
-                hovertemplate="horizon=%{x} ticks<br>signal-aligned move=%{y:.4f}<extra></extra>",
+                hovertemplate="horizon=%{x} ticks<br>tail directional move=%{y:.4f}<extra></extra>",
             ),
             row=2,
             col=1,
@@ -304,8 +304,8 @@ def build_signal_decay_figure(
         margin={"l": 64, "r": 28, "t": 82, "b": 54},
         height=780,
     )
-    figure.update_yaxes(title_text="Correlation", zeroline=True, zerolinecolor="#94a3b8", row=1, col=1)
-    figure.update_yaxes(title_text="Signal-Aligned Forward Price Move", zeroline=True, zerolinecolor="#94a3b8", row=2, col=1)
+    figure.update_yaxes(title_text="Tail Correlation", zeroline=True, zerolinecolor="#94a3b8", row=1, col=1)
+    figure.update_yaxes(title_text="Tail Directional Price Move", zeroline=True, zerolinecolor="#94a3b8", row=2, col=1)
     figure.update_xaxes(title_text=f"Forward Horizon Ticks ({candle_minutes}m each)", row=2, col=1)
     return figure
 

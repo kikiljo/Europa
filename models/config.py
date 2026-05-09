@@ -7,11 +7,11 @@ from dataclasses import dataclass, field
 class ModelShapeConfig:
     name: str = "baseline_factor_ensemble"
     label: str = "Baseline Factor Ensemble"
-    input_signal_names: tuple[str, ...] = ("fast_ema", "slow_ema", "rsi", "breakout_high", "breakout_low")
+    input_signal_names: tuple[str, ...] = ("fast_ema_slope", "slow_ema_slope", "ema_spread", "rsi_momentum", "rsi_reversion")
     output_signal_name: str = "baseline_model_score"
     output_signal_label: str = "Baseline Model Score"
     target_horizon_ticks: int = 4
-    normalization: str = "zscore"
+    normalization: str = "expanding_zscore_30"
     trend_weight: float = 0.45
     rsi_weight: float = 0.30
     breakout_weight: float = 0.25

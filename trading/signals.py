@@ -71,13 +71,10 @@ class TailEventSummary:
     signal_source: str
     tail: str
     count: int
-    total_observations: int
-    share_pct: float
     mean_signal: MaybeFloat
     mean_close: MaybeFloat
-    mean_one_tick_price_change: MaybeFloat
-    mean_lookback_price_change: MaybeFloat
-    mean_range_price: MaybeFloat
+    mean_one_tick_directional_price_change: MaybeFloat
+    mean_lookback_directional_price_change: MaybeFloat
     forward_mean_directional_price_changes: dict[int, MaybeFloat]
 
 
@@ -208,6 +205,33 @@ def signal_forward_return_correlations(
     return results
 
 
+def signal_forward_tail_correlations(
+    signals: list[ResearchSignal],
+    forward_values: dict[int, list[MaybeFloat]],
+    *,
+    tail_fraction: float = 0.01,
+) -> list[CorrelationResult]:
+    if tail_fraction <= 0 or tail_fraction >= 0.5:
+        raise ValueError("tail_fraction must be greater than 0 and less than 0.5")
+
+    results: list[CorrelationResult] = []
+    for signal in signals:
+        for horizon, values in forward_values.items():
+            pairs = _tail_pairs(signal.values, values, tail_fraction)
+            correlation = _pearson([pair[0] for pair in pairs], [pair[1] for pair in pairs]) if len(pairs) >= 3 else None
+            results.append(
+                CorrelationResult(
+                    signal_name=signal.name,
+                    signal_label=signal.label,
+                    signal_source=signal.source,
+                    horizon=horizon,
+                    sample_size=len(pairs),
+                    correlation=correlation,
+                )
+            )
+    return results
+
+
 def signal_forward_value_decile_comparisons(
     signals: list[ResearchSignal],
     forward_values: dict[int, list[MaybeFloat]],
@@ -220,16 +244,15 @@ def signal_forward_value_decile_comparisons(
     results: list[DecileSpreadResult] = []
     for signal in signals:
         for horizon, values in forward_values.items():
-            pairs = sorted(_paired_values(signal.values, values), key=lambda pair: pair[0])
-            bucket_size = int(len(pairs) * tail_fraction)
-            if bucket_size < 1:
+            pairs = _tail_pairs_by_side(signal.values, values, tail_fraction)
+            if pairs is None:
                 results.append(
                     DecileSpreadResult(
                         signal_name=signal.name,
                         signal_label=signal.label,
                         signal_source=signal.source,
                         horizon=horizon,
-                        sample_size=len(pairs),
+                        sample_size=0,
                         bottom_mean_value=None,
                         top_mean_value=None,
                         mean_value=None,
@@ -238,8 +261,9 @@ def signal_forward_value_decile_comparisons(
                 )
                 continue
 
-            bottom_values = [_directional_value(pair[0], pair[1]) for pair in pairs[:bucket_size]]
-            top_values = [_directional_value(pair[0], pair[1]) for pair in pairs[-bucket_size:]]
+            bottom_pairs, top_pairs = pairs
+            bottom_values = [_directional_value(pair[0], pair[1]) for pair in bottom_pairs]
+            top_values = [_directional_value(pair[0], pair[1]) for pair in top_pairs]
             bottom_mean = sum(bottom_values) / len(bottom_values)
             top_mean = sum(top_values) / len(top_values)
             mean_value = sum(bottom_values + top_values) / (len(bottom_values) + len(top_values))
@@ -249,7 +273,7 @@ def signal_forward_value_decile_comparisons(
                     signal_label=signal.label,
                     signal_source=signal.source,
                     horizon=horizon,
-                    sample_size=len(pairs),
+                    sample_size=len(bottom_pairs) + len(top_pairs),
                     bottom_mean_value=bottom_mean,
                     top_mean_value=top_mean,
                     mean_value=mean_value,
@@ -275,7 +299,6 @@ def signal_tail_events(
     summaries: list[TailEventSummary] = []
     points: list[TailEventPoint] = []
     closes = [candle.close for candle in candles]
-    ranges = [candle.high - candle.low for candle in candles]
     one_tick_price_changes = _lookback_price_changes(closes, 1)
     lookback_price_changes = _lookback_price_changes(closes, lookback_ticks)
 
@@ -308,13 +331,18 @@ def signal_tail_events(
                     signal_source=signal.source,
                     tail=tail_name,
                     count=len(tail_values),
-                    total_observations=len(indexed_values),
-                    share_pct=(len(tail_values) / len(indexed_values) * 100) if indexed_values else 0.0,
                     mean_signal=_mean(signal_values),
                     mean_close=_mean([closes[index] for index in event_indices]),
-                    mean_one_tick_price_change=_mean([one_tick_price_changes[index] for index in event_indices if one_tick_price_changes[index] is not None]),
-                    mean_lookback_price_change=_mean([lookback_price_changes[index] for index in event_indices if lookback_price_changes[index] is not None]),
-                    mean_range_price=_mean([ranges[index] for index in event_indices]),
+                    mean_one_tick_directional_price_change=_mean([
+                        _directional_value(signal_value, one_tick_price_changes[index])
+                        for index, signal_value in tail_values
+                        if one_tick_price_changes[index] is not None
+                    ]),
+                    mean_lookback_directional_price_change=_mean([
+                        _directional_value(signal_value, lookback_price_changes[index])
+                        for index, signal_value in tail_values
+                        if lookback_price_changes[index] is not None
+                    ]),
                     forward_mean_directional_price_changes={
                         horizon: _mean([
                             _directional_value(signal_value, changes[index])
@@ -334,6 +362,39 @@ def _paired_values(left: list[MaybeFloat], right: list[MaybeFloat]) -> list[tupl
         if left_value is not None and right_value is not None:
             pairs.append((left_value, right_value))
     return pairs
+
+
+def _tail_pairs(left: list[MaybeFloat], right: list[MaybeFloat], tail_fraction: float) -> list[tuple[float, float]]:
+    pairs_by_side = _tail_pairs_by_side(left, right, tail_fraction)
+    if pairs_by_side is None:
+        return []
+    bottom_pairs, top_pairs = pairs_by_side
+    return bottom_pairs + top_pairs
+
+
+def _tail_pairs_by_side(
+    left: list[MaybeFloat],
+    right: list[MaybeFloat],
+    tail_fraction: float,
+) -> tuple[list[tuple[float, float]], list[tuple[float, float]]] | None:
+    indexed_values = [(index, value) for index, value in enumerate(left) if value is not None and index < len(right)]
+    indexed_values.sort(key=lambda item: item[1])
+    bucket_size = int(len(indexed_values) * tail_fraction)
+    if bucket_size < 1:
+        return None
+    bottom_pairs = [
+        (signal_value, right[index])
+        for index, signal_value in indexed_values[:bucket_size]
+        if right[index] is not None
+    ]
+    top_pairs = [
+        (signal_value, right[index])
+        for index, signal_value in indexed_values[-bucket_size:]
+        if right[index] is not None
+    ]
+    if not bottom_pairs or not top_pairs:
+        return None
+    return bottom_pairs, top_pairs
 
 
 def _lookback_price_changes(values: list[float], lookback_ticks: int) -> list[MaybeFloat]:

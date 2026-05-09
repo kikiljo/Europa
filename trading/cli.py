@@ -113,7 +113,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument("--data", type=Path, default=None)
     analyze_parser.add_argument("--out", type=Path, default=None)
     analyze_parser.add_argument("--interval", default=None, help="analyze a non-default dataset interval, e.g. 15m uses data/<market>_usd_15m.csv when --data is omitted")
-    analyze_parser.add_argument("--horizons", default=None, help="forward sampling ticks for correlation, e.g. 1-240 or 1,2,4,8,16")
+    analyze_parser.add_argument("--horizons", default=None, help="forward sampling ticks, e.g. 1-240 or 1,2,4,8,16")
     analyze_parser.add_argument("--factor-signals", default=None, help="comma-separated factor names to include as signals")
     analyze_parser.add_argument("--round-trip-cost-bps", type=float, default=None, help="round-trip trading cost in bps; defaults to 2 * TRADER_FEE_BPS")
     analyze_parser.add_argument("--hourly-cost-bps", type=float, default=0.0, help="estimated carry/funding cost in bps per hour")

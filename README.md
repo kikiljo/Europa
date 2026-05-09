@@ -113,7 +113,7 @@ Write an interactive mid-price chart:
 python -m trading plot --market SOL
 ```
 
-Generate a factor signal analysis report with selected factor snapshots, live-safe expanding-normalized signals, 1-240 tick signal-aligned forward price-move decay, price-equivalent cost curves, and top/bottom tail-event analysis:
+Generate a factor signal analysis report with processed factor snapshots, live-safe expanding-normalized signals, 1-240 tick tail-only correlation/decay, price-equivalent cost curves, and simplified top/bottom tail-event analysis:
 
 ```powershell
 python -m trading analyze --market SOL
@@ -122,14 +122,16 @@ python -m trading analyze --market SOL
 Customize report horizons, factor signals, the cost curve, and top/bottom tail size:
 
 ```powershell
-python -m trading analyze --market SOL --horizons 1-240 --factor-signals fast_ema,slow_ema,rsi,atr --hourly-cost-bps 0.10 --tail-fraction 0.01
+python -m trading analyze --market SOL --horizons 1-240 --factor-signals fast_ema_slope,slow_ema_slope,ema_spread,price_vs_slow_ema,rsi_momentum,rsi_reversion,rsi_slope --hourly-cost-bps 0.10 --tail-fraction 0.01
 ```
 
-Run the same analysis on 15 minute candles after fetching a 15m dataset:
+Run the same analysis on 5 minute and 15 minute candles after fetching fresh datasets:
 
 ```powershell
+python -m trading fetch-history-range --market SOL --interval 5m --out data/sol_usd_5m.csv --days 200
 python -m trading fetch-history-range --market SOL --interval 15m --out data/sol_usd_15m.csv --days 200
-python -m trading analyze --market SOL --interval 15m --horizons 1-240 --factor-signals fast_ema,slow_ema,rsi,atr
+python -m trading analyze --market SOL --interval 5m --horizons 1-240
+python -m trading analyze --market SOL --interval 15m --horizons 1-240
 ```
 
 Build the baseline model training dataset and print the training scaffold summary:

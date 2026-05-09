@@ -18,7 +18,7 @@ from trading.signals import (
     SignalSummary,
     TailEventSummary,
     future_price_changes,
-    signal_forward_return_correlations,
+    signal_forward_tail_correlations,
     signal_forward_value_decile_comparisons,
     signal_tail_events,
     summarize_signals,
@@ -68,8 +68,8 @@ def write_analysis_report(
     selected_horizons = horizons or DEFAULT_FORWARD_HORIZONS
     analysis_candle_minutes = candle_minutes or (meta.interval_minutes if meta is not None else config.strategy.candle_minutes)
     price_changes_by_horizon = future_price_changes(candles, selected_horizons)
-    correlations = signal_forward_return_correlations(research_signals, price_changes_by_horizon)
-    decile_comparisons = signal_forward_value_decile_comparisons(research_signals, price_changes_by_horizon)
+    tail_correlations = signal_forward_tail_correlations(research_signals, price_changes_by_horizon, tail_fraction=tail_fraction)
+    decile_comparisons = signal_forward_value_decile_comparisons(research_signals, price_changes_by_horizon, tail_fraction=tail_fraction)
     tail_summary_horizons = _checkpoint_horizons(selected_horizons)
     tail_summary_price_changes = {horizon: price_changes_by_horizon[horizon] for horizon in tail_summary_horizons}
     tail_summaries, tail_points = signal_tail_events(
@@ -95,7 +95,7 @@ def write_analysis_report(
         title=f"{config.strategy.market} Mid Price Context",
     )
     decay_figure = build_signal_decay_figure(
-        correlations,
+        tail_correlations,
         decile_comparisons,
         cost_price_by_horizon=cost_price_by_horizon,
         candle_minutes=analysis_candle_minutes,
@@ -125,7 +125,7 @@ def write_analysis_report(
             selected_factor_names=selected_factor_names,
             factor_values=factor_values,
             signal_summaries=signal_summaries,
-            correlations=correlations,
+            tail_correlations=tail_correlations,
             tail_summaries=tail_summaries,
             tail_summary_horizons=tail_summary_horizons,
             candle_minutes=analysis_candle_minutes,
@@ -153,7 +153,7 @@ def _render_report_html(
     selected_factor_names: list[str],
     factor_values: list[FactorValue],
     signal_summaries: list[SignalSummary],
-    correlations: list[CorrelationResult],
+    tail_correlations: list[CorrelationResult],
     tail_summaries: list[TailEventSummary],
     tail_summary_horizons: list[int],
     candle_minutes: int,
@@ -169,7 +169,7 @@ def _render_report_html(
 ) -> str:
     generated_at = datetime.now(timezone.utc).isoformat()
     meta_rows = _meta_rows(meta, data_path, candles)
-    horizons = _unique_ordered([result.horizon for result in correlations])
+    horizons = _unique_ordered([result.horizon for result in tail_correlations])
     horizon_label = _horizon_range_label(horizons, candle_minutes)
     cards = _setup_cards(
         signal_count=len(signal_summaries),
@@ -194,8 +194,12 @@ def _render_report_html(
     cost_text = _cost_formula_text(round_trip_cost_bps, hourly_cost_bps, candle_minutes)
     tail_text = (
         f"Tail events use top and bottom {tail_fraction * 100:.2f}% normalized signal values. "
-        f"Forward columns are signal-aligned: positive signal keeps the price move, negative signal flips it. "
-        f"Lookback move uses raw price change over {tail_lookback_ticks} ticks."
+        f"All move columns are signal-aligned: positive means price moved with the signal direction. "
+        f"Lookback uses {tail_lookback_ticks} ticks."
+    )
+    decay_text = (
+        f"Both rows use only top and bottom {tail_fraction * 100:.2f}% signal events. "
+        "The first row is tail-only correlation; the second row is the combined bottom+top tail signal-aligned price move versus estimated cost."
     )
 
     return f"""<!doctype html>
@@ -258,6 +262,7 @@ def _render_report_html(
 
     <section>
         <h2>Signal Decay</h2>
+        <div class="muted">{_escape(decay_text)}</div>
         <div class="chart">{decay_chart_html}</div>
     </section>
 
@@ -302,12 +307,12 @@ def parse_horizons(raw_value: str | None) -> list[int]:
             start = int(start_raw.strip())
             end = int(end_raw.strip())
             if start <= 0 or end <= 0 or end < start:
-                raise ValueError("correlation horizon ranges must be positive and increasing")
+                raise ValueError("forward horizon ranges must be positive and increasing")
             horizons.extend(range(start, end + 1))
             continue
         value = int(token)
         if value <= 0:
-            raise ValueError("correlation horizons must be positive")
+            raise ValueError("forward horizons must be positive")
         horizons.append(value)
     return _unique_ordered(horizons)
 
@@ -444,8 +449,8 @@ def _signal_summary_rows(summaries: list[SignalSummary]) -> str:
 def _tail_summary_rows(summaries: list[TailEventSummary], horizons: list[int], candle_minutes: int) -> str:
     horizon_headers = "".join(f"<th>{_escape('Dir ' + _format_horizon(horizon, candle_minutes))}</th>" for horizon in horizons)
     header = (
-        "<tr><th>Source</th><th>Signal</th><th>Tail</th><th>Count</th><th>Share</th>"
-        "<th>Mean Signal</th><th>Mean Close</th><th>Prev Tick Move</th><th>Lookback Move</th><th>Range</th>"
+        "<tr><th>Source</th><th>Signal</th><th>Tail</th><th>Count</th>"
+        "<th>Mean Signal</th><th>Mean Close</th><th>Dir Prev Tick Move</th><th>Dir Lookback Move</th>"
         f"{horizon_headers}</tr>"
     )
     rows = "".join(
@@ -454,12 +459,10 @@ def _tail_summary_rows(summaries: list[TailEventSummary], horizons: list[int], c
         f"<td>{_escape(summary.signal_label)}</td>"
         f"<td>{_escape(summary.tail)}</td>"
         f"<td>{summary.count}</td>"
-        f"<td>{_escape(_format_value(summary.share_pct))}%</td>"
         f"<td>{_escape(_format_value(summary.mean_signal))}</td>"
         f"<td>{_escape(_format_value(summary.mean_close))}</td>"
-        f"<td>{_escape(_format_price_delta(summary.mean_one_tick_price_change))}</td>"
-        f"<td>{_escape(_format_price_delta(summary.mean_lookback_price_change))}</td>"
-        f"<td>{_escape(_format_price_delta(summary.mean_range_price))}</td>"
+        f"<td>{_escape(_format_price_delta(summary.mean_one_tick_directional_price_change))}</td>"
+        f"<td>{_escape(_format_price_delta(summary.mean_lookback_directional_price_change))}</td>"
         + "".join(f"<td>{_escape(_format_price_delta(summary.forward_mean_directional_price_changes.get(horizon)))}</td>" for horizon in horizons)
         + "</tr>"
         for summary in summaries
