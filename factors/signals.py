@@ -13,6 +13,25 @@ DEFAULT_FACTOR_SIGNAL_NAMES = [
     "rsi_momentum",
     "rsi_reversion",
     "rsi_slope",
+    "pyth_confidence_pct",
+    "pyth_ema_confidence_pct",
+    "pyth_confidence_slope",
+    "pyth_confidence_gap",
+]
+
+CROSS_ASSET_FACTOR_SIGNAL_NAMES = [
+    "cross_asset_reversion",
+    "cross_asset_reversion_slope",
+    "cross_asset_beta",
+    "cross_asset_corr",
+]
+
+CROSS_MARKET_FACTOR_SIGNAL_NAMES = [
+    "cross_market_reversion",
+    "cross_market_reversion_slope",
+    "cross_market_corr_min",
+    "cross_market_eth_beta",
+    "cross_market_btc_beta",
 ]
 
 

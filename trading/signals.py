@@ -210,14 +210,18 @@ def signal_forward_tail_correlations(
     forward_values: dict[int, list[MaybeFloat]],
     *,
     tail_fraction: float = 0.01,
+    tail_filter_mask: list[bool] | None = None,
+    tail_dedup_ticks: int = 0,
 ) -> list[CorrelationResult]:
     if tail_fraction <= 0 or tail_fraction >= 0.5:
         raise ValueError("tail_fraction must be greater than 0 and less than 0.5")
+    if tail_dedup_ticks < 0:
+        raise ValueError("tail_dedup_ticks must be non-negative")
 
     results: list[CorrelationResult] = []
     for signal in signals:
         for horizon, values in forward_values.items():
-            pairs = _tail_pairs(signal.values, values, tail_fraction)
+            pairs = _tail_pairs(signal.values, values, tail_fraction, tail_filter_mask=tail_filter_mask, tail_dedup_ticks=tail_dedup_ticks)
             correlation = _pearson([pair[0] for pair in pairs], [pair[1] for pair in pairs]) if len(pairs) >= 3 else None
             results.append(
                 CorrelationResult(
@@ -237,14 +241,18 @@ def signal_forward_value_decile_comparisons(
     forward_values: dict[int, list[MaybeFloat]],
     *,
     tail_fraction: float = 0.10,
+    tail_filter_mask: list[bool] | None = None,
+    tail_dedup_ticks: int = 0,
 ) -> list[DecileSpreadResult]:
     if tail_fraction <= 0 or tail_fraction >= 0.5:
         raise ValueError("tail_fraction must be greater than 0 and less than 0.5")
+    if tail_dedup_ticks < 0:
+        raise ValueError("tail_dedup_ticks must be non-negative")
 
     results: list[DecileSpreadResult] = []
     for signal in signals:
         for horizon, values in forward_values.items():
-            pairs = _tail_pairs_by_side(signal.values, values, tail_fraction)
+            pairs = _tail_pairs_by_side(signal.values, values, tail_fraction, tail_filter_mask=tail_filter_mask, tail_dedup_ticks=tail_dedup_ticks)
             if pairs is None:
                 results.append(
                     DecileSpreadResult(
@@ -290,11 +298,15 @@ def signal_tail_events(
     *,
     tail_fraction: float = 0.01,
     lookback_ticks: int = 48,
+    tail_filter_mask: list[bool] | None = None,
+    tail_dedup_ticks: int = 0,
 ) -> tuple[list[TailEventSummary], list[TailEventPoint]]:
     if tail_fraction <= 0 or tail_fraction >= 0.5:
         raise ValueError("tail_fraction must be greater than 0 and less than 0.5")
     if lookback_ticks <= 0:
         raise ValueError("lookback_ticks must be positive")
+    if tail_dedup_ticks < 0:
+        raise ValueError("tail_dedup_ticks must be non-negative")
 
     summaries: list[TailEventSummary] = []
     points: list[TailEventPoint] = []
@@ -303,12 +315,12 @@ def signal_tail_events(
     lookback_price_changes = _lookback_price_changes(closes, lookback_ticks)
 
     for signal in signals:
-        indexed_values = [(index, value) for index, value in enumerate(signal.values) if value is not None and index < len(candles)]
-        indexed_values.sort(key=lambda item: item[1])
-        tail_count = max(1, int(len(indexed_values) * tail_fraction)) if indexed_values else 0
+        tail_values_by_side = _tail_values_by_side(signal.values, len(candles), tail_fraction, tail_filter_mask=tail_filter_mask, tail_dedup_ticks=tail_dedup_ticks)
+        if tail_values_by_side is None:
+            continue
         tail_sets = (
-            ("bottom", indexed_values[:tail_count]),
-            ("top", indexed_values[-tail_count:]),
+            ("bottom", tail_values_by_side[0]),
+            ("top", tail_values_by_side[1]),
         )
         for tail_name, tail_values in tail_sets:
             event_indices = [index for index, _ in tail_values]
@@ -364,8 +376,15 @@ def _paired_values(left: list[MaybeFloat], right: list[MaybeFloat]) -> list[tupl
     return pairs
 
 
-def _tail_pairs(left: list[MaybeFloat], right: list[MaybeFloat], tail_fraction: float) -> list[tuple[float, float]]:
-    pairs_by_side = _tail_pairs_by_side(left, right, tail_fraction)
+def _tail_pairs(
+    left: list[MaybeFloat],
+    right: list[MaybeFloat],
+    tail_fraction: float,
+    *,
+    tail_filter_mask: list[bool] | None = None,
+    tail_dedup_ticks: int = 0,
+) -> list[tuple[float, float]]:
+    pairs_by_side = _tail_pairs_by_side(left, right, tail_fraction, tail_filter_mask=tail_filter_mask, tail_dedup_ticks=tail_dedup_ticks)
     if pairs_by_side is None:
         return []
     bottom_pairs, top_pairs = pairs_by_side
@@ -376,25 +395,65 @@ def _tail_pairs_by_side(
     left: list[MaybeFloat],
     right: list[MaybeFloat],
     tail_fraction: float,
+    *,
+    tail_filter_mask: list[bool] | None = None,
+    tail_dedup_ticks: int = 0,
 ) -> tuple[list[tuple[float, float]], list[tuple[float, float]]] | None:
-    indexed_values = [(index, value) for index, value in enumerate(left) if value is not None and index < len(right)]
-    indexed_values.sort(key=lambda item: item[1])
-    bucket_size = int(len(indexed_values) * tail_fraction)
-    if bucket_size < 1:
+    tail_values_by_side = _tail_values_by_side(left, len(right), tail_fraction, tail_filter_mask=tail_filter_mask, tail_dedup_ticks=tail_dedup_ticks)
+    if tail_values_by_side is None:
         return None
+    bottom_values, top_values = tail_values_by_side
     bottom_pairs = [
         (signal_value, right[index])
-        for index, signal_value in indexed_values[:bucket_size]
+        for index, signal_value in bottom_values
         if right[index] is not None
     ]
     top_pairs = [
         (signal_value, right[index])
-        for index, signal_value in indexed_values[-bucket_size:]
+        for index, signal_value in top_values
         if right[index] is not None
     ]
     if not bottom_pairs or not top_pairs:
         return None
     return bottom_pairs, top_pairs
+
+
+def _tail_values_by_side(
+    values: list[MaybeFloat],
+    max_length: int,
+    tail_fraction: float,
+    *,
+    tail_filter_mask: list[bool] | None = None,
+    tail_dedup_ticks: int = 0,
+) -> tuple[list[tuple[int, float]], list[tuple[int, float]]] | None:
+    indexed_values = [
+        (index, value)
+        for index, value in enumerate(values)
+        if value is not None
+        and index < max_length
+        and (tail_filter_mask is None or (index < len(tail_filter_mask) and tail_filter_mask[index]))
+    ]
+    indexed_values.sort(key=lambda item: item[1])
+    bucket_size = int(len(indexed_values) * tail_fraction)
+    if bucket_size < 1:
+        return None
+    bottom_values = _deduplicate_tail_values(indexed_values[:bucket_size], tail_dedup_ticks)
+    top_values = _deduplicate_tail_values(indexed_values[-bucket_size:], tail_dedup_ticks)
+    if not bottom_values or not top_values:
+        return None
+    return bottom_values, top_values
+
+
+def _deduplicate_tail_values(values: list[tuple[int, float]], dedup_ticks: int) -> list[tuple[int, float]]:
+    if dedup_ticks <= 1:
+        return values
+    kept: list[tuple[int, float]] = []
+    last_index: int | None = None
+    for index, value in sorted(values, key=lambda item: item[0]):
+        if last_index is None or index - last_index >= dedup_ticks:
+            kept.append((index, value))
+            last_index = index
+    return kept
 
 
 def _lookback_price_changes(values: list[float], lookback_ticks: int) -> list[MaybeFloat]:

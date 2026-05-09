@@ -1,15 +1,21 @@
 # marketdata.v1
 
-`marketdata.v1` is the canonical OHLCV format used by both backtests and live sampling.
+`marketdata.v1` is the canonical OHLCV format used by both backtests and live sampling. It can also carry optional source-specific oracle quality columns when they are available.
 
 ## CSV
 
 File name is market-specific, for example `sol_usd_30m.csv`.
 
-Required header:
+Required core header:
 
 ```csv
 ts,open,high,low,close,volume
+```
+
+Current writers emit the full header below. Older six-column OHLCV files remain readable; optional columns may be blank.
+
+```csv
+ts,open,high,low,close,volume,pyth_price,pyth_confidence,pyth_ema_price,pyth_ema_confidence,pyth_publish_time
 ```
 
 Fields:
@@ -20,6 +26,11 @@ Fields:
 - `low`: lowest price in the bucket.
 - `close`: last price in the bucket.
 - `volume`: source volume if available; live oracle samples use `0.0`.
+- `pyth_price`: optional Hermes price sampled near the candle close.
+- `pyth_confidence`: optional Pyth confidence interval in price units.
+- `pyth_ema_price`: optional Hermes EMA price sampled near the candle close.
+- `pyth_ema_confidence`: optional Pyth EMA confidence interval in price units.
+- `pyth_publish_time`: optional Unix publish time of the sampled Hermes update.
 
 Numeric values are written as decimal strings with fixed precision. Consumers should parse them as floats or decimals.
 
@@ -62,7 +73,7 @@ Metadata fields:
 - `count`: number of candle rows.
 - `generated_at`: UTC timestamp when the file was written.
 - `notes`: human-readable source notes.
-- `extras`: source-specific machine-readable fields. For Pyth-backed data, include `pyth_price_id` when known. Writers also add `expected_count` and `missing_count` for basic gap accounting.
+- `extras`: source-specific machine-readable fields. For Pyth-backed data, include `pyth_price_id` when known. Pyth confidence enrichment adds `pyth_confidence_price_id`, `pyth_confidence_days`, `pyth_confidence_since`, and `pyth_confidence_enriched_count`. Writers also add `expected_count` and `missing_count` for basic gap accounting.
 
 ## Code Ownership
 

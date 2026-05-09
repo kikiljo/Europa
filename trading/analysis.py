@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import json
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -29,8 +30,118 @@ DEFAULT_FORWARD_HORIZONS = list(range(1, 241))
 DEFAULT_REPORT_HORIZON_CHECKPOINTS = [1, 2, 4, 8, 16, 32, 48, 96, 144, 240]
 
 
+@dataclass(frozen=True)
+class FactorReportGroup:
+    key: str
+    label: str
+    factor_names: list[str]
+
+
 def default_analysis_report_path(market: str) -> Path:
     return Path("reports") / f"{market.lower()}_analysis.html"
+
+
+def default_factor_report_root() -> Path:
+    return Path("reports") / "factors"
+
+
+def default_factor_group_report_path(
+    root: Path,
+    *,
+    market: str,
+    candle_minutes: int,
+    family_key: str,
+    tail_fraction: float,
+    variant_slug: str = "",
+) -> Path:
+    market_slug = _slugify(market)
+    interval_slug = _interval_slug(candle_minutes)
+    family_slug = _slugify(family_key)
+    variant = f"_{variant_slug}" if variant_slug else ""
+    return root / family_slug / f"{market_slug}_{interval_slug}_{family_slug}_analysis_{_tail_fraction_slug(tail_fraction)}{variant}.html"
+
+
+def factor_report_groups(factor_names: list[str] | None = None) -> list[FactorReportGroup]:
+    factor_repository = default_factor_repository()
+    selected_factor_names = _selected_factor_names(factor_names)
+    definitions = {definition.name: definition for definition in factor_repository.definitions()}
+    _validate_factor_names(selected_factor_names, definitions)
+
+    groups: dict[str, FactorReportGroup] = {}
+    for name in selected_factor_names:
+        definition = definitions[name]
+        key = definition.family or definition.name
+        label = definition.family_label or definition.label
+        if key not in groups:
+            groups[key] = FactorReportGroup(key=key, label=label, factor_names=[])
+        groups[key].factor_names.append(name)
+    return list(groups.values())
+
+
+def write_factor_group_reports(
+    candles: list[Candle],
+    output_root: Path,
+    *,
+    config: AppConfig,
+    data_path: Path,
+    reference_candles: list[Candle] | None = None,
+    reference_candles_by_name: dict[str, list[Candle]] | None = None,
+    reference_data_path: Path | str | None = None,
+    meta: DatasetMeta | None = None,
+    horizons: list[int] | None = None,
+    factor_names: list[str] | None = None,
+    round_trip_cost_bps: float | None = None,
+    hourly_cost_bps: float = 0.0,
+    tail_fraction: float = 0.01,
+    tail_lookback_ticks: int = 48,
+    tail_filter_factor: str | None = None,
+    tail_filter_min: float | None = None,
+    tail_filter_max: float | None = None,
+    tail_dedup_ticks: int = 0,
+    candle_minutes: int | None = None,
+) -> list[Path]:
+    analysis_candle_minutes = candle_minutes or (meta.interval_minutes if meta is not None else config.strategy.candle_minutes)
+    variant_slug = _report_variant_slug(
+        tail_filter_factor=tail_filter_factor,
+        tail_filter_min=tail_filter_min,
+        tail_filter_max=tail_filter_max,
+        tail_dedup_ticks=tail_dedup_ticks,
+    )
+    written_paths: list[Path] = []
+    for group in factor_report_groups(factor_names):
+        output_path = default_factor_group_report_path(
+            output_root,
+            market=config.strategy.market,
+            candle_minutes=analysis_candle_minutes,
+            family_key=group.key,
+            tail_fraction=tail_fraction,
+            variant_slug=variant_slug,
+        )
+        written_paths.append(
+            write_analysis_report(
+                candles,
+                output_path,
+                config=config,
+                data_path=data_path,
+                reference_candles=reference_candles,
+                reference_candles_by_name=reference_candles_by_name,
+                reference_data_path=reference_data_path,
+                meta=meta,
+                horizons=horizons,
+                factor_names=group.factor_names,
+                round_trip_cost_bps=round_trip_cost_bps,
+                hourly_cost_bps=hourly_cost_bps,
+                tail_fraction=tail_fraction,
+                tail_lookback_ticks=tail_lookback_ticks,
+                tail_filter_factor=tail_filter_factor,
+                tail_filter_min=tail_filter_min,
+                tail_filter_max=tail_filter_max,
+                tail_dedup_ticks=tail_dedup_ticks,
+                candle_minutes=analysis_candle_minutes,
+                report_title=f"{config.strategy.market} {group.label} Signal Analysis Report",
+            )
+        )
+    return written_paths
 
 
 def write_analysis_report(
@@ -39,6 +150,9 @@ def write_analysis_report(
     *,
     config: AppConfig,
     data_path: Path,
+    reference_candles: list[Candle] | None = None,
+    reference_candles_by_name: dict[str, list[Candle]] | None = None,
+    reference_data_path: Path | str | None = None,
     meta: DatasetMeta | None = None,
     horizons: list[int] | None = None,
     factor_names: list[str] | None = None,
@@ -46,30 +160,64 @@ def write_analysis_report(
     hourly_cost_bps: float = 0.0,
     tail_fraction: float = 0.01,
     tail_lookback_ticks: int = 48,
+    tail_filter_factor: str | None = None,
+    tail_filter_min: float | None = None,
+    tail_filter_max: float | None = None,
+    tail_dedup_ticks: int = 0,
     candle_minutes: int | None = None,
+    report_title: str | None = None,
 ) -> Path:
     if not candles:
         raise ValueError("cannot analyze an empty candle series")
 
-    factor_series = compute_factor_series(candles, config.strategy)
+    factor_series = compute_factor_series(
+        candles,
+        config.strategy,
+        reference_candles=reference_candles,
+        reference_candles_by_name=reference_candles_by_name,
+    )
     latest_factors = factor_series.latest()
     factor_repository = default_factor_repository()
     selected_factor_names = _selected_factor_names(factor_names)
-    known_factor_names = {definition.name for definition in factor_repository.definitions()}
-    unknown_factor_names = [name for name in selected_factor_names if name not in known_factor_names]
-    if unknown_factor_names:
-        known = ", ".join(sorted(known_factor_names))
-        unknown = ", ".join(unknown_factor_names)
-        raise ValueError(f"unknown factor signal(s): {unknown}; available factors: {known}")
+    definitions = {definition.name: definition for definition in factor_repository.definitions()}
+    _validate_factor_names(selected_factor_names, definitions)
+    if tail_filter_factor is not None:
+        _validate_factor_names([tail_filter_factor], definitions)
 
     values_by_name = {value.definition.name: value for value in factor_repository.latest_values(latest_factors)}
     factor_values = [values_by_name[name] for name in selected_factor_names]
     research_signals = build_factor_signals(factor_series, repository=factor_repository, names=selected_factor_names)
+    tail_filter_mask = _tail_filter_mask(
+        factor_series,
+        factor_name=tail_filter_factor,
+        minimum=tail_filter_min,
+        maximum=tail_filter_max,
+    )
+    tail_filter_text = _tail_filter_text(
+        tail_filter_factor=tail_filter_factor,
+        tail_filter_min=tail_filter_min,
+        tail_filter_max=tail_filter_max,
+        tail_filter_mask=tail_filter_mask,
+        total_count=len(candles),
+        tail_dedup_ticks=tail_dedup_ticks,
+    )
     selected_horizons = horizons or DEFAULT_FORWARD_HORIZONS
     analysis_candle_minutes = candle_minutes or (meta.interval_minutes if meta is not None else config.strategy.candle_minutes)
     price_changes_by_horizon = future_price_changes(candles, selected_horizons)
-    tail_correlations = signal_forward_tail_correlations(research_signals, price_changes_by_horizon, tail_fraction=tail_fraction)
-    decile_comparisons = signal_forward_value_decile_comparisons(research_signals, price_changes_by_horizon, tail_fraction=tail_fraction)
+    tail_correlations = signal_forward_tail_correlations(
+        research_signals,
+        price_changes_by_horizon,
+        tail_fraction=tail_fraction,
+        tail_filter_mask=tail_filter_mask,
+        tail_dedup_ticks=tail_dedup_ticks,
+    )
+    decile_comparisons = signal_forward_value_decile_comparisons(
+        research_signals,
+        price_changes_by_horizon,
+        tail_fraction=tail_fraction,
+        tail_filter_mask=tail_filter_mask,
+        tail_dedup_ticks=tail_dedup_ticks,
+    )
     tail_summary_horizons = _checkpoint_horizons(selected_horizons)
     tail_summary_price_changes = {horizon: price_changes_by_horizon[horizon] for horizon in tail_summary_horizons}
     tail_summaries, tail_points = signal_tail_events(
@@ -78,6 +226,8 @@ def write_analysis_report(
         tail_summary_price_changes,
         tail_fraction=tail_fraction,
         lookback_ticks=tail_lookback_ticks,
+        tail_filter_mask=tail_filter_mask,
+        tail_dedup_ticks=tail_dedup_ticks,
     )
     signal_summaries = summarize_signals(research_signals)
     selected_round_trip_cost_bps = config.risk.fee_bps * 2 if round_trip_cost_bps is None else round_trip_cost_bps
@@ -120,6 +270,7 @@ def write_analysis_report(
         _render_report_html(
             config=config,
             data_path=data_path,
+            reference_data_path=reference_data_path,
             meta=meta,
             candles=candles,
             selected_factor_names=selected_factor_names,
@@ -134,6 +285,8 @@ def write_analysis_report(
             hourly_cost_bps=hourly_cost_bps,
             tail_fraction=tail_fraction,
             tail_lookback_ticks=tail_lookback_ticks,
+            tail_filter_text=tail_filter_text,
+            report_title=report_title,
             decay_chart_html=decay_chart_html,
             distribution_chart_html=distribution_chart_html,
             tail_event_chart_html=tail_event_chart_html,
@@ -148,6 +301,7 @@ def _render_report_html(
     *,
     config: AppConfig,
     data_path: Path,
+    reference_data_path: Path | str | None,
     meta: DatasetMeta | None,
     candles: list[Candle],
     selected_factor_names: list[str],
@@ -162,6 +316,8 @@ def _render_report_html(
     hourly_cost_bps: float,
     tail_fraction: float,
     tail_lookback_ticks: int,
+    tail_filter_text: str,
+    report_title: str | None,
     decay_chart_html: str,
     distribution_chart_html: str,
     tail_event_chart_html: str,
@@ -201,13 +357,15 @@ def _render_report_html(
         f"Both rows use only top and bottom {tail_fraction * 100:.2f}% signal events. "
         "The first row is tail-only correlation; the second row is the combined bottom+top tail signal-aligned price move versus estimated cost."
     )
+    title = report_title or f"{config.strategy.market} Signal Analysis Report"
+    reference_text = f"; reference {reference_data_path}" if reference_data_path is not None else ""
 
     return f"""<!doctype html>
 <html lang="en">
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>{_escape(config.strategy.market)} Signal Analysis Report</title>
+    <title>{_escape(title)}</title>
   <style>
     body {{ margin: 0; font-family: Inter, Segoe UI, Arial, sans-serif; color: #111827; background: #f8fafc; }}
     main {{ max-width: 1180px; margin: 0 auto; padding: 28px 24px 48px; }}
@@ -229,13 +387,13 @@ def _render_report_html(
 </head>
 <body>
 <main>
-    <h1>{_escape(config.strategy.market)} Signal Analysis Report</h1>
-  <div class="muted">Generated at {generated_at} from { _escape(str(data_path)) }</div>
+    <h1>{_escape(title)}</h1>
+    <div class="muted">Generated at {generated_at} from { _escape(str(data_path)) }{_escape(reference_text)}</div>
 
   <section>
     <h2>Analysis Setup</h2>
     <div class="cards">{cards}</div>
-        <div class="muted">Selected factors: {_escape(selected_factor_text)}. Cost curve is converted into price units: {_escape(cost_text)}.</div>
+        <div class="muted">Selected factors: {_escape(selected_factor_text)}. Cost curve is converted into price units: {_escape(cost_text)}. Tail selection: {_escape(tail_filter_text)}.</div>
   </section>
 
   <section>
@@ -325,6 +483,14 @@ def parse_factor_names(raw_value: str | None) -> list[str] | None:
 
 def _selected_factor_names(factor_names: list[str] | None) -> list[str]:
     return _unique_ordered(factor_names or list(DEFAULT_FACTOR_SIGNAL_NAMES))
+
+
+def _validate_factor_names(selected_factor_names: list[str], known_factor_names: dict[str, object]) -> None:
+    unknown_factor_names = [name for name in selected_factor_names if name not in known_factor_names]
+    if unknown_factor_names:
+        known = ", ".join(sorted(known_factor_names))
+        unknown = ", ".join(unknown_factor_names)
+        raise ValueError(f"unknown factor signal(s): {unknown}; available factors: {known}")
 
 
 def _setup_cards(
@@ -477,6 +643,104 @@ def _format_horizon(horizon: int, candle_minutes: int) -> str:
     if total_minutes % 60 == 0:
         return f"+{horizon} ticks ({total_minutes // 60}h)"
     return f"+{horizon} ticks ({total_minutes}m)"
+
+
+def _interval_slug(candle_minutes: int) -> str:
+    if candle_minutes % (60 * 24) == 0:
+        return f"{candle_minutes // (60 * 24)}d"
+    if candle_minutes % 60 == 0:
+        return f"{candle_minutes // 60}h"
+    return f"{candle_minutes}m"
+
+
+def _tail_fraction_slug(tail_fraction: float) -> str:
+    percentage = tail_fraction * 100
+    if percentage.is_integer():
+        return f"tail{int(percentage):02d}"
+    return "tail" + f"{percentage:.2f}".rstrip("0").rstrip(".").replace(".", "p")
+
+
+def _report_variant_slug(
+    *,
+    tail_filter_factor: str | None,
+    tail_filter_min: float | None,
+    tail_filter_max: float | None,
+    tail_dedup_ticks: int,
+) -> str:
+    parts: list[str] = []
+    if tail_filter_factor:
+        parts.extend(["filter", _slugify(tail_filter_factor)])
+        if tail_filter_min is not None:
+            parts.append(f"gte{_number_slug(tail_filter_min)}")
+        if tail_filter_max is not None:
+            parts.append(f"lte{_number_slug(tail_filter_max)}")
+    if tail_dedup_ticks > 0:
+        parts.append(f"dedup{tail_dedup_ticks}")
+    return "_".join(parts)
+
+
+def _number_slug(value: float) -> str:
+    return f"{value:.4f}".rstrip("0").rstrip(".").replace("-", "m").replace(".", "p")
+
+
+def _tail_filter_mask(
+    factor_series: object,
+    *,
+    factor_name: str | None,
+    minimum: float | None,
+    maximum: float | None,
+) -> list[bool] | None:
+    if factor_name is None:
+        return None
+    values = factor_series.values_for(factor_name)
+    mask: list[bool] = []
+    for value in values:
+        if value is None:
+            mask.append(False)
+            continue
+        if minimum is not None and value < minimum:
+            mask.append(False)
+            continue
+        if maximum is not None and value > maximum:
+            mask.append(False)
+            continue
+        mask.append(True)
+    return mask
+
+
+def _tail_filter_text(
+    *,
+    tail_filter_factor: str | None,
+    tail_filter_min: float | None,
+    tail_filter_max: float | None,
+    tail_filter_mask: list[bool] | None,
+    total_count: int,
+    tail_dedup_ticks: int,
+) -> str:
+    parts: list[str] = []
+    if tail_filter_factor is None:
+        parts.append("no factor filter")
+    else:
+        constraints: list[str] = []
+        if tail_filter_min is not None:
+            constraints.append(f">= {_format_value(tail_filter_min)}")
+        if tail_filter_max is not None:
+            constraints.append(f"<= {_format_value(tail_filter_max)}")
+        constraint_text = " and ".join(constraints) if constraints else "non-null"
+        eligible_count = sum(1 for value in (tail_filter_mask or []) if value)
+        parts.append(f"{tail_filter_factor} {constraint_text}; eligible {eligible_count}/{total_count}")
+    parts.append(f"dedup {tail_dedup_ticks} ticks" if tail_dedup_ticks > 0 else "no dedup")
+    return "; ".join(parts)
+
+
+def _slugify(value: str) -> str:
+    chars: list[str] = []
+    for char in value.lower():
+        if char.isalnum():
+            chars.append(char)
+        elif chars and chars[-1] != "_":
+            chars.append("_")
+    return "".join(chars).strip("_") or "factor"
 
 
 def _format_value(value: Any) -> str:

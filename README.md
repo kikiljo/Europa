@@ -93,6 +93,15 @@ ts,open,high,low,close,volume
 
 Each CSV has a `<dataset>.meta.json` sidecar. The full schema is in `data/SCHEMA.md`.
 
+Pyth Benchmarks OHLCV history does not include confidence bands, but Hermes can return historical `price.conf` at a requested publish time. Enrich an existing candle file with optional Pyth confidence columns before running oracle-quality factor reports:
+
+```powershell
+python -m trading enrich-pyth-confidence --market SOL --interval 5m --days 4
+python -m trading enrich-pyth-confidence --market SOL --interval 15m --days 4
+```
+
+The enrichment command skips rows that already have confidence data unless `--overwrite` is passed. Pyth confidence factors are uncertainty/regime inputs, not standalone long/short predictors; use their reports as a quality filter diagnostic first.
+
 ## Research Workflow
 
 Run a backtest:
@@ -124,6 +133,46 @@ Customize report horizons, factor signals, the cost curve, and top/bottom tail s
 ```powershell
 python -m trading analyze --market SOL --horizons 1-240 --factor-signals fast_ema_slope,slow_ema_slope,ema_spread,price_vs_slow_ema,rsi_momentum,rsi_reversion,rsi_slope --hourly-cost-bps 0.10 --tail-fraction 0.01
 ```
+
+Write separate reports by factor family. This keeps related variants together, such as RSI momentum/reversion/slope under one RSI report, while unrelated EMA factors stay in a separate folder:
+
+```powershell
+python -m trading analyze --market SOL --interval 15m --horizons 1-240 --tail-fraction 0.03 --group-by-factor-family
+```
+
+Grouped reports are written under `reports/factors/<family>/`, for example `reports/factors/rsi/`, `reports/factors/ema/`, and `reports/factors/pyth/`. Future order-book factors should use their own `order_book` family once the data feed contains bid/ask/depth snapshots; OHLCV-only files cannot produce real order-book imbalance, spread, or depth factors.
+
+Generate SOL-vs-ETH cross-asset mean-reversion reports by first fetching ETH reference candles, then passing ETH as the reference market:
+
+```powershell
+python -m trading fetch-history-range --market ETH --interval 5m --out data/eth_usd_5m.csv --days 200
+python -m trading fetch-history-range --market ETH --interval 15m --out data/eth_usd_15m.csv --days 200
+python -m trading analyze --market SOL --interval 5m --reference-market ETH --factor-signals cross_asset_reversion,cross_asset_reversion_slope,cross_asset_beta,cross_asset_corr --tail-fraction 0.03 --group-by-factor-family
+python -m trading analyze --market SOL --interval 15m --reference-market ETH --factor-signals cross_asset_reversion,cross_asset_reversion_slope,cross_asset_beta,cross_asset_corr --tail-fraction 0.03 --group-by-factor-family
+```
+
+The cross-asset reversion factor uses a rolling 96-tick log-price regression of SOL against the reference market. Positive reversion means SOL is cheap versus the reference; negative means SOL is rich.
+
+Quickly test the two-leg version of the same idea as an actual pair trade PnL. Positive spread signals open long SOL / short ETH hedge; negative signals open short SOL / long ETH hedge. The hedge notional uses the rolling regression beta, and fees are charged on both legs for open and close:
+
+```powershell
+python -m trading pair-backtest --market SOL --interval 5m --reference-market ETH --entry-z 2.0 --exit-z 0.25 --min-corr 0.75 --max-hold-ticks 96 --cooldown-ticks 10
+python -m trading pair-backtest --market SOL --interval 15m --reference-market ETH --entry-z 2.0 --exit-z 0.25 --min-corr 0.75 --max-hold-ticks 96 --cooldown-ticks 10
+python -m trading pair-backtest --market SOL --interval 5m --reference-market ETH --entry-tail-fraction 0.01 --exit-z 0.25 --min-corr 0.90 --max-hold-ticks 192 --cooldown-ticks 10
+```
+
+Reports are written under `reports/pair_backtests/`. Use `--gross-exposure-usd`, `--fee-bps`, `--hourly-cost-bps`, and `--max-weekly-trades 0` to stress-test sizing, costs, carry, and trade frequency.
+
+Generate SOL-vs-ETH+BTC basket mean-reversion reports with a correlation-quality filter and dense-signal deduplication:
+
+```powershell
+python -m trading fetch-history-range --market BTC --interval 5m --out data/btc_usd_5m.csv --days 200
+python -m trading fetch-history-range --market BTC --interval 15m --out data/btc_usd_15m.csv --days 200
+python -m trading analyze --market SOL --interval 5m --reference-markets ETH,BTC --factor-signals cross_market_reversion,cross_market_reversion_slope,cross_market_corr_min,cross_market_eth_beta,cross_market_btc_beta --tail-fraction 0.03 --tail-filter-factor cross_market_corr_min --tail-filter-min 0.75 --tail-dedup-ticks 10 --group-by-factor-family
+python -m trading analyze --market SOL --interval 15m --reference-markets ETH,BTC --factor-signals cross_market_reversion,cross_market_reversion_slope,cross_market_corr_min,cross_market_eth_beta,cross_market_btc_beta --tail-fraction 0.03 --tail-filter-factor cross_market_corr_min --tail-filter-min 0.75 --tail-dedup-ticks 10 --group-by-factor-family
+```
+
+The basket factor fits `log(SOL) ~ log(ETH) + log(BTC)` over a rolling 96-tick window. `--tail-filter-factor` filters the eligible event universe before selecting top/bottom tails, and `--tail-dedup-ticks 10` keeps only the first event in each dense 10-tick cluster.
 
 Run the same analysis on 5 minute and 15 minute candles after fetching fresh datasets:
 

@@ -3,17 +3,19 @@ from __future__ import annotations
 import argparse
 import json
 from dataclasses import asdict, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from factors import compute_factor_series
+from factors import CROSS_ASSET_FACTOR_SIGNAL_NAMES, CROSS_MARKET_FACTOR_SIGNAL_NAMES, DEFAULT_FACTOR_SIGNAL_NAMES, compute_factor_series
 from models import ModelShapeConfig, TrainingConfig, train_baseline_model
 from backtest.engine import BacktestEngine
-from trading.analysis import default_analysis_report_path, parse_factor_names, parse_horizons, write_analysis_report
+from backtest.pair import PairBacktestConfig, PairBacktestEngine, default_pair_backtest_report_path, write_pair_backtest_report
+from trading.analysis import default_analysis_report_path, default_factor_report_root, parse_factor_names, parse_horizons, write_analysis_report, write_factor_group_reports
 from trading.broker import JupiterCliPerpsBroker
 from trading.config import AppConfig, DEFAULT_MARKETS_PATH, ExecutionConfig, PROJECT_ROOT
 from trading.data import (
     JupiterPriceClient,
+    enrich_candles_with_pyth_confidence,
     fetch_binance_spot_candles,
     fetch_coinbase_history_paginated,
     fetch_coinbase_spot_price,
@@ -22,6 +24,7 @@ from trading.data import (
     fetch_pyth_history_paginated,
     fetch_pyth_spot_price,
     load_candles,
+    load_dataset_meta,
     parse_interval_minutes,
     update_canonical_with_price,
     write_dataset,
@@ -44,12 +47,16 @@ def main() -> None:
         fetch_history_range(args, config)
     elif args.command == "backtest":
         run_backtest(args, config)
+    elif args.command == "pair-backtest":
+        run_pair_backtest(args, config)
     elif args.command == "signal":
         print_signal(args, config)
     elif args.command == "plot":
         plot_mid_price(args, config)
     elif args.command == "analyze":
         analyze_market(args, config)
+    elif args.command == "enrich-pyth-confidence":
+        enrich_pyth_confidence(args, config)
     elif args.command == "train-model":
         train_model(args, config)
     elif args.command == "run-once":
@@ -100,6 +107,25 @@ def build_parser() -> argparse.ArgumentParser:
     backtest_parser = subparsers.add_parser("backtest", parents=[common_parser], help="run a local CSV backtest")
     backtest_parser.add_argument("--data", type=Path, default=None)
 
+    pair_backtest_parser = subparsers.add_parser("pair-backtest", parents=[common_parser], help="run a two-leg SOL/reference mean-reversion backtest")
+    pair_backtest_parser.add_argument("--data", type=Path, default=None)
+    pair_backtest_parser.add_argument("--reference-market", default="ETH", help="configured reference market, e.g. ETH")
+    pair_backtest_parser.add_argument("--reference-data", type=Path, default=None, help="explicit reference candle CSV")
+    pair_backtest_parser.add_argument("--interval", default=None, help="dataset interval, e.g. 5m or 15m")
+    pair_backtest_parser.add_argument("--out", type=Path, default=None)
+    pair_backtest_parser.add_argument("--entry-z", type=float, default=2.0)
+    pair_backtest_parser.add_argument("--entry-tail-fraction", type=float, default=0.0, help="when positive, enter only current live top/bottom tail signals, e.g. 0.01 = top/bottom 1%%")
+    pair_backtest_parser.add_argument("--regression-lookback", type=int, default=96, help="rolling regression/correlation lookback in ticks")
+    pair_backtest_parser.add_argument("--exit-z", type=float, default=0.25)
+    pair_backtest_parser.add_argument("--stop-z", type=float, default=4.0)
+    pair_backtest_parser.add_argument("--min-corr", type=float, default=0.75)
+    pair_backtest_parser.add_argument("--max-hold-ticks", type=int, default=96)
+    pair_backtest_parser.add_argument("--cooldown-ticks", type=int, default=10)
+    pair_backtest_parser.add_argument("--gross-exposure-usd", type=float, default=None, help="gross notional across both legs; defaults to equity * default leverage")
+    pair_backtest_parser.add_argument("--fee-bps", type=float, default=None, help="per-side fee bps per leg; defaults to TRADER_FEE_BPS")
+    pair_backtest_parser.add_argument("--hourly-cost-bps", type=float, default=0.0, help="estimated carry/funding cost in bps per hour on gross exposure")
+    pair_backtest_parser.add_argument("--max-weekly-trades", type=int, default=None, help="0 disables the weekly pair-entry cap; defaults to risk config")
+
     signal_parser = subparsers.add_parser("signal", parents=[common_parser], help="print the current strategy signal")
     signal_parser.add_argument("--data", type=Path, default=None)
 
@@ -119,6 +145,24 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument("--hourly-cost-bps", type=float, default=0.0, help="estimated carry/funding cost in bps per hour")
     analyze_parser.add_argument("--tail-fraction", type=float, default=0.01, help="tail fraction for large-signal event analysis, e.g. 0.01 = top/bottom 1%%")
     analyze_parser.add_argument("--tail-lookback-ticks", type=int, default=48, help="lookback ticks used to describe market state around tail events")
+    analyze_parser.add_argument("--group-by-factor-family", action="store_true", help="write one report per factor family under reports/factors/<family>; --out is treated as the output root")
+    analyze_parser.add_argument("--reference-market", default=None, help="load a configured reference market, e.g. ETH, for cross-asset factors")
+    analyze_parser.add_argument("--reference-markets", default=None, help="comma-separated configured reference markets, e.g. ETH,BTC, for basket factors")
+    analyze_parser.add_argument("--reference-data", type=Path, default=None, help="explicit reference market candle CSV for cross-asset factors")
+    analyze_parser.add_argument("--tail-filter-factor", default=None, help="optional factor name used to filter eligible tail events, e.g. cross_market_corr_min")
+    analyze_parser.add_argument("--tail-filter-min", type=float, default=None, help="minimum raw factor value for --tail-filter-factor")
+    analyze_parser.add_argument("--tail-filter-max", type=float, default=None, help="maximum raw factor value for --tail-filter-factor")
+    analyze_parser.add_argument("--tail-dedup-ticks", type=int, default=0, help="when positive, keep only the first tail event in each dense N-tick cluster")
+
+    enrich_parser = subparsers.add_parser("enrich-pyth-confidence", parents=[common_parser], help="sample Hermes confidence near candle close times and write optional oracle columns")
+    enrich_parser.add_argument("--data", type=Path, default=None)
+    enrich_parser.add_argument("--out", type=Path, default=None, help="defaults to overwriting --data/configured data path")
+    enrich_parser.add_argument("--interval", default=None, help="dataset interval, e.g. 5m/15m; used to query candle-close snapshots")
+    enrich_parser.add_argument("--days", type=int, default=14, help="number of trailing days to enrich")
+    enrich_parser.add_argument("--pyth-price-id", default=None)
+    enrich_parser.add_argument("--max-workers", type=int, default=1)
+    enrich_parser.add_argument("--sleep-seconds", type=float, default=0.2, help="sequential throttle when --max-workers is 1")
+    enrich_parser.add_argument("--overwrite", action="store_true", help="re-fetch confidence for rows that already have Pyth confidence")
 
     train_parser = subparsers.add_parser("train-model", parents=[common_parser], help="build the baseline model training dataset and print a training scaffold summary")
     train_parser.add_argument("--data", type=Path, default=None)
@@ -147,6 +191,34 @@ def analysis_data_path_from_args(args: argparse.Namespace, config: AppConfig, in
         return config.strategy.data_path
     interval_text = interval_string_from_minutes(interval_minutes)
     return PROJECT_ROOT / "data" / f"{config.strategy.market.lower()}_usd_{interval_text}.csv"
+
+
+def reference_data_path_from_args(args: argparse.Namespace, config: AppConfig, interval_minutes: int | None) -> Path | None:
+    if args.reference_data is not None:
+        return args.reference_data
+    if not args.reference_market:
+        return None
+    reference_key = str(args.reference_market).lower()
+    reference_interval = interval_minutes or config.strategy.candle_minutes
+    interval_text = interval_string_from_minutes(reference_interval)
+    return PROJECT_ROOT / "data" / f"{reference_key}_usd_{interval_text}.csv"
+
+
+def reference_data_paths_from_args(args: argparse.Namespace, config: AppConfig, interval_minutes: int | None) -> dict[str, Path]:
+    if args.reference_data is not None:
+        reference_key = str(args.reference_market or "REFERENCE").upper()
+        return {reference_key: args.reference_data}
+    raw_reference_markets = args.reference_markets or args.reference_market
+    if not raw_reference_markets:
+        return {}
+    reference_interval = interval_minutes or config.strategy.candle_minutes
+    interval_text = interval_string_from_minutes(reference_interval)
+    paths: dict[str, Path] = {}
+    for item in str(raw_reference_markets).split(","):
+        reference_key = item.strip().upper()
+        if reference_key:
+            paths[reference_key] = PROJECT_ROOT / "data" / f"{reference_key.lower()}_usd_{interval_text}.csv"
+    return paths
 
 
 def default_analysis_output_path(market: str, interval_minutes: int | None) -> Path:
@@ -287,6 +359,46 @@ def run_backtest(args: argparse.Namespace, config: AppConfig) -> None:
     print(json.dumps(result.summary(), indent=2))
 
 
+def run_pair_backtest(args: argparse.Namespace, config: AppConfig) -> None:
+    interval_minutes = parse_interval_minutes(args.interval) if args.interval else config.strategy.candle_minutes
+    data_path = analysis_data_path_from_args(args, config, interval_minutes)
+    reference_key = str(args.reference_market or "ETH").upper()
+    if args.reference_data is not None:
+        reference_data_path = args.reference_data
+    else:
+        interval_text = interval_string_from_minutes(interval_minutes)
+        reference_data_path = PROJECT_ROOT / "data" / f"{reference_key.lower()}_usd_{interval_text}.csv"
+    primary_candles = load_candles(data_path)
+    reference_candles = load_candles(reference_data_path)
+    if not primary_candles:
+        raise SystemExit(f"no primary candles found at {data_path}")
+    if not reference_candles:
+        raise SystemExit(f"no reference candles found at {reference_data_path}")
+
+    pair_config = PairBacktestConfig(
+        primary_label=config.strategy.market,
+        reference_label=reference_key,
+        candle_minutes=interval_minutes,
+        entry_z=args.entry_z,
+        entry_tail_fraction=args.entry_tail_fraction,
+        regression_lookback=args.regression_lookback,
+        exit_z=args.exit_z,
+        stop_z=args.stop_z,
+        min_corr=args.min_corr,
+        max_hold_ticks=args.max_hold_ticks,
+        cooldown_ticks=args.cooldown_ticks,
+        gross_exposure_usd=args.gross_exposure_usd or config.risk.equity_usd * config.risk.default_leverage,
+        fee_bps=args.fee_bps if args.fee_bps is not None else config.risk.fee_bps,
+        hourly_cost_bps=args.hourly_cost_bps,
+        max_weekly_trades=args.max_weekly_trades if args.max_weekly_trades is not None else config.risk.max_weekly_trades,
+    )
+    engine = PairBacktestEngine(config.strategy, config.risk, pair_config)
+    result = engine.run(primary_candles, reference_candles)
+    output_path = args.out or (PROJECT_ROOT / default_pair_backtest_report_path(config.strategy.market, reference_key, interval_minutes))
+    written = write_pair_backtest_report(result, output_path)
+    print(json.dumps({"summary": result.summary(), "report": str(written), "data": str(data_path), "reference_data": str(reference_data_path)}, indent=2))
+
+
 def print_signal(args: argparse.Namespace, config: AppConfig) -> None:
     candles = load_candles(data_path_from_args(args, config))
     position = load_position(config.execution.state_path)
@@ -316,25 +428,126 @@ def plot_mid_price(args: argparse.Namespace, config: AppConfig) -> None:
 def analyze_market(args: argparse.Namespace, config: AppConfig) -> None:
     interval_minutes = parse_interval_minutes(args.interval) if args.interval else None
     data_path = analysis_data_path_from_args(args, config, interval_minutes)
+    reference_data_paths = reference_data_paths_from_args(args, config, interval_minutes)
+    reference_data_path = next(iter(reference_data_paths.values()), None)
     output_path = args.out or default_analysis_output_path(config.strategy.market, interval_minutes)
     candles = load_candles(data_path)
     if not candles:
         raise SystemExit(f"no candles found at {data_path}")
+    reference_candles_by_name = {name: load_candles(path) for name, path in reference_data_paths.items()}
+    for name, path in reference_data_paths.items():
+        if not reference_candles_by_name[name]:
+            raise SystemExit(f"no reference candles found for {name} at {path}")
+    reference_candles = next(iter(reference_candles_by_name.values()), None)
+    reference_label = ", ".join(f"{name}={path}" for name, path in reference_data_paths.items()) or None
+    factor_names = parse_factor_names(args.factor_signals)
+    if reference_candles_by_name and factor_names is None:
+        factor_names = list(DEFAULT_FACTOR_SIGNAL_NAMES) + list(CROSS_ASSET_FACTOR_SIGNAL_NAMES)
+        if {"ETH", "BTC"}.issubset(reference_candles_by_name):
+            factor_names += list(CROSS_MARKET_FACTOR_SIGNAL_NAMES)
+    if args.group_by_factor_family:
+        output_root = args.out or (PROJECT_ROOT / default_factor_report_root())
+        written = write_factor_group_reports(
+            candles,
+            output_root,
+            config=config,
+            data_path=data_path,
+            reference_candles=reference_candles,
+            reference_candles_by_name=reference_candles_by_name,
+            reference_data_path=reference_label,
+            meta=load_meta_for_chart(data_path),
+            horizons=parse_horizons(args.horizons),
+            factor_names=factor_names,
+            round_trip_cost_bps=args.round_trip_cost_bps,
+            hourly_cost_bps=args.hourly_cost_bps,
+            tail_fraction=args.tail_fraction,
+            tail_lookback_ticks=args.tail_lookback_ticks,
+            tail_filter_factor=args.tail_filter_factor,
+            tail_filter_min=args.tail_filter_min,
+            tail_filter_max=args.tail_filter_max,
+            tail_dedup_ticks=args.tail_dedup_ticks,
+            candle_minutes=interval_minutes,
+        )
+        print(json.dumps({"written": [str(path) for path in written], "candles": len(candles)}, indent=2))
+        return
     written = write_analysis_report(
         candles,
         output_path,
         config=config,
         data_path=data_path,
+        reference_candles=reference_candles,
+        reference_candles_by_name=reference_candles_by_name,
+        reference_data_path=reference_label,
         meta=load_meta_for_chart(data_path),
         horizons=parse_horizons(args.horizons),
-        factor_names=parse_factor_names(args.factor_signals),
+        factor_names=factor_names,
         round_trip_cost_bps=args.round_trip_cost_bps,
         hourly_cost_bps=args.hourly_cost_bps,
         tail_fraction=args.tail_fraction,
         tail_lookback_ticks=args.tail_lookback_ticks,
+        tail_filter_factor=args.tail_filter_factor,
+        tail_filter_min=args.tail_filter_min,
+        tail_filter_max=args.tail_filter_max,
+        tail_dedup_ticks=args.tail_dedup_ticks,
         candle_minutes=interval_minutes,
     )
     print(json.dumps({"written": str(written), "candles": len(candles)}, indent=2))
+
+
+def enrich_pyth_confidence(args: argparse.Namespace, config: AppConfig) -> None:
+    interval_minutes = interval_minutes_from_args(args, config)
+    data_path = analysis_data_path_from_args(args, config, interval_minutes)
+    out_path = args.out or data_path
+    price_id = args.pyth_price_id or config.strategy.pyth_price_id
+    if not price_id:
+        raise SystemExit(f"market {config.strategy.market} is missing pyth_price_id")
+    candles = load_candles(data_path)
+    if not candles:
+        raise SystemExit(f"no candles found at {data_path}")
+    since = datetime.now(timezone.utc) - timedelta(days=args.days)
+    enriched = enrich_candles_with_pyth_confidence(
+        candles,
+        price_id,
+        interval_minutes=interval_minutes,
+        since=since,
+        max_workers=args.max_workers,
+        sleep_seconds=args.sleep_seconds,
+        overwrite=args.overwrite,
+    )
+    enriched_count = sum(1 for candle in enriched if candle.timestamp >= since and candle.pyth_confidence is not None)
+    existing_meta = load_dataset_meta(data_path)
+    extras = dict(existing_meta.extras) if existing_meta else {}
+    extras.update(
+        {
+            "pyth_confidence_price_id": price_id,
+            "pyth_confidence_days": args.days,
+            "pyth_confidence_since": since.isoformat(),
+            "pyth_confidence_enriched_count": enriched_count,
+        }
+    )
+    meta = write_dataset(
+        out_path,
+        enriched,
+        symbol=existing_meta.symbol if existing_meta else config.strategy.symbol,
+        instrument=existing_meta.instrument if existing_meta else config.strategy.instrument,
+        venue=existing_meta.venue if existing_meta else "jupiter-perps",
+        interval_minutes=interval_minutes,
+        source=existing_meta.source if existing_meta else f"pyth-hermes:{price_id}",
+        notes=_append_note_once(existing_meta.notes if existing_meta else "", "pyth_confidence_enriched"),
+        extras=extras,
+    )
+    print(json.dumps({"written": len(enriched), "enriched": enriched_count, "path": str(out_path), "meta": meta.to_json_dict()}, indent=2))
+
+
+def _append_note_once(notes: str, note: str) -> str:
+    parts: list[str] = []
+    seen: set[str] = set()
+    for part in [item.strip() for item in notes.split(";") if item.strip()] + [note]:
+        if part in seen:
+            continue
+        seen.add(part)
+        parts.append(part)
+    return "; ".join(parts)
 
 
 def train_model(args: argparse.Namespace, config: AppConfig) -> None:

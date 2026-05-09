@@ -1,6 +1,6 @@
 from factors.core import FactorSeries, FactorSnapshot, MaybeFloat, compute_factor_series
 from factors.repository import FactorDefinition, FactorRepository, FactorValue, default_factor_repository
-from factors.signals import DEFAULT_FACTOR_SIGNAL_NAMES, build_factor_signals
+from factors.signals import CROSS_ASSET_FACTOR_SIGNAL_NAMES, CROSS_MARKET_FACTOR_SIGNAL_NAMES, DEFAULT_FACTOR_SIGNAL_NAMES, build_factor_signals
 
 __all__ = [
     "FactorDefinition",
@@ -10,6 +10,8 @@ __all__ = [
     "FactorValue",
     "MaybeFloat",
     "DEFAULT_FACTOR_SIGNAL_NAMES",
+    "CROSS_ASSET_FACTOR_SIGNAL_NAMES",
+    "CROSS_MARKET_FACTOR_SIGNAL_NAMES",
     "build_factor_signals",
     "compute_factor_series",
     "default_factor_repository",

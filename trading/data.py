@@ -6,6 +6,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,7 +16,19 @@ from trading.config import WRAPPED_SOL_MINT
 from trading.domain import Candle
 
 
-CANDLE_FIELDS = ["ts", "open", "high", "low", "close", "volume"]
+CANDLE_FIELDS = [
+    "ts",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "pyth_price",
+    "pyth_confidence",
+    "pyth_ema_price",
+    "pyth_ema_confidence",
+    "pyth_publish_time",
+]
 MARKETDATA_SCHEMA = "marketdata.v1"
 
 
@@ -499,37 +512,142 @@ PYTH_BENCHMARKS_BASE = "https://benchmarks.pyth.network"
 PYTH_HERMES_BASE = "https://hermes.pyth.network"
 
 
-def _normalize_pyth_price(price_payload: dict[str, Any]) -> float:
-    price = float(price_payload["price"])
+@dataclass(frozen=True)
+class PythPriceSnapshot:
+    price: float
+    confidence: float
+    ema_price: float | None
+    ema_confidence: float | None
+    publish_time: int
+
+
+def _normalize_pyth_value(price_payload: dict[str, Any], field_name: str) -> float:
+    price = float(price_payload[field_name])
     expo = int(price_payload["expo"])
     return price * (10 ** expo)
 
 
-def fetch_pyth_spot_price(price_id: str) -> float:
-    clean_id = price_id.removeprefix("0x")
-    if not clean_id:
-        raise DataError("Pyth price_id is required")
-    query = urllib.parse.urlencode({"ids[]": clean_id})
-    url = f"{PYTH_HERMES_BASE}/v2/updates/price/latest?{query}"
+def _normalize_pyth_price(price_payload: dict[str, Any]) -> float:
+    return _normalize_pyth_value(price_payload, "price")
+
+
+def _parse_pyth_price_snapshot(parsed_entry: dict[str, Any]) -> PythPriceSnapshot:
+    price_payload = parsed_entry["price"]
+    ema_payload = parsed_entry.get("ema_price") or {}
+    return PythPriceSnapshot(
+        price=_normalize_pyth_price(price_payload),
+        confidence=_normalize_pyth_value(price_payload, "conf"),
+        ema_price=_normalize_pyth_price(ema_payload) if ema_payload else None,
+        ema_confidence=_normalize_pyth_value(ema_payload, "conf") if ema_payload else None,
+        publish_time=int(price_payload["publish_time"]),
+    )
+
+
+def _fetch_pyth_parsed_update(url: str, *, timeout: int = 20, max_retries: int = 4) -> dict[str, Any]:
     request = urllib.request.Request(
         url,
         headers={"accept": "application/json", "user-agent": "europa-marketdata/0.1"},
     )
-    try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:300]
-        raise DataError(f"Unable to fetch Pyth price: HTTP {exc.code} {detail}") from exc
-    except OSError as exc:
-        raise DataError(f"Unable to fetch Pyth price: {exc}") from exc
+    for attempt in range(max_retries + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:300]
+            if exc.code == 429 and attempt < max_retries:
+                retry_after = exc.headers.get("Retry-After")
+                delay = float(retry_after) if retry_after else min(8.0, 0.75 * (2 ** attempt))
+                time.sleep(delay)
+                continue
+            raise DataError(f"Unable to fetch Pyth price: HTTP {exc.code} {detail}") from exc
+        except OSError as exc:
+            if attempt < max_retries:
+                time.sleep(min(8.0, 0.75 * (2 ** attempt)))
+                continue
+            raise DataError(f"Unable to fetch Pyth price: {exc}") from exc
+    raise DataError("Unable to fetch Pyth price after retries")
+
+
+def fetch_pyth_price_snapshot(price_id: str, *, publish_time: int | None = None) -> PythPriceSnapshot:
+    clean_id = price_id.removeprefix("0x")
+    if not clean_id:
+        raise DataError("Pyth price_id is required")
+    params: dict[str, str] = {"ids[]": clean_id, "parsed": "true"}
+    query = urllib.parse.urlencode(params)
+    if publish_time is None:
+        url = f"{PYTH_HERMES_BASE}/v2/updates/price/latest?{query}"
+    else:
+        url = f"{PYTH_HERMES_BASE}/v2/updates/price/{publish_time}?{query}"
+    payload = _fetch_pyth_parsed_update(url)
     parsed = payload.get("parsed") or []
     if not parsed:
         raise DataError(f"Pyth returned no parsed price for {clean_id}: {payload}")
-    price = _normalize_pyth_price(parsed[0]["price"])
-    if price <= 0:
+    snapshot = _parse_pyth_price_snapshot(parsed[0])
+    if snapshot.price <= 0:
         raise DataError(f"Pyth returned a non-positive price for {clean_id}: {payload}")
-    return price
+    return snapshot
+
+
+def fetch_pyth_spot_price(price_id: str) -> float:
+    return fetch_pyth_price_snapshot(price_id).price
+
+
+def enrich_candles_with_pyth_confidence(
+    candles: list[Candle],
+    price_id: str,
+    *,
+    interval_minutes: int,
+    since: datetime | None = None,
+    max_workers: int = 1,
+    sleep_seconds: float = 0.2,
+    overwrite: bool = False,
+) -> list[Candle]:
+    targets = [
+        (index, int(candle.timestamp.timestamp()) + interval_minutes * 60 - 1)
+        for index, candle in enumerate(candles)
+        if since is None or candle.timestamp >= since
+        if overwrite or candle.pyth_confidence is None
+    ]
+    if not targets:
+        return candles
+
+    snapshots: dict[int, PythPriceSnapshot] = {}
+    if max_workers <= 1:
+        for index, publish_time in targets:
+            snapshots[index] = fetch_pyth_price_snapshot(price_id, publish_time=publish_time)
+            if sleep_seconds > 0:
+                time.sleep(sleep_seconds)
+    else:
+        with ThreadPoolExecutor(max_workers=max(1, max_workers)) as executor:
+            futures = {
+                executor.submit(fetch_pyth_price_snapshot, price_id, publish_time=publish_time): index
+                for index, publish_time in targets
+            }
+            for future in as_completed(futures):
+                snapshots[futures[future]] = future.result()
+
+    enriched: list[Candle] = []
+    for index, candle in enumerate(candles):
+        snapshot = snapshots.get(index)
+        if snapshot is None:
+            enriched.append(candle)
+            continue
+        enriched.append(
+            Candle(
+                timestamp=candle.timestamp,
+                open=candle.open,
+                high=candle.high,
+                low=candle.low,
+                close=candle.close,
+                volume=candle.volume,
+                pyth_price=snapshot.price,
+                pyth_confidence=snapshot.confidence,
+                pyth_ema_price=snapshot.ema_price,
+                pyth_ema_confidence=snapshot.ema_confidence,
+                pyth_publish_time=snapshot.publish_time,
+            )
+        )
+    return enriched
 
 
 def _fetch_pyth_chunk(
@@ -597,6 +715,7 @@ def fetch_pyth_history_paginated(
     days: int = 200,
     *,
     chunk_days: int = 30,
+    max_candles_per_page: int = 8000,
     sleep_seconds: float = 0.4,
     max_pages: int = 200,
 ) -> list[Candle]:
@@ -612,7 +731,7 @@ def fetch_pyth_history_paginated(
     start_ts = end_ts - days * 86400
     seen: dict[datetime, Candle] = {}
     cursor = start_ts
-    step = chunk_days * 86400
+    step = min(chunk_days * 86400, max(1, interval_minutes) * 60 * max_candles_per_page)
     pages = 0
     while cursor < end_ts and pages < max_pages:
         chunk_end = min(cursor + step, end_ts)

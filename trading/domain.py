@@ -25,6 +25,11 @@ class Candle:
     low: float
     close: float
     volume: float = 0.0
+    pyth_price: float | None = None
+    pyth_confidence: float | None = None
+    pyth_ema_price: float | None = None
+    pyth_ema_confidence: float | None = None
+    pyth_publish_time: int | None = None
 
     @staticmethod
     def parse_timestamp(raw_value: str) -> datetime:
@@ -46,6 +51,11 @@ class Candle:
             low=float(row["low"]),
             close=float(row["close"]),
             volume=float(row.get("volume", 0) or 0),
+            pyth_price=_optional_float(row.get("pyth_price")),
+            pyth_confidence=_optional_float(row.get("pyth_confidence")),
+            pyth_ema_price=_optional_float(row.get("pyth_ema_price")),
+            pyth_ema_confidence=_optional_float(row.get("pyth_ema_confidence")),
+            pyth_publish_time=_optional_int(row.get("pyth_publish_time")),
         )
 
     def to_csv_row(self) -> dict[str, str]:
@@ -56,7 +66,28 @@ class Candle:
             "low": f"{self.low:.10f}",
             "close": f"{self.close:.10f}",
             "volume": f"{self.volume:.10f}",
+            "pyth_price": _format_optional_float(self.pyth_price),
+            "pyth_confidence": _format_optional_float(self.pyth_confidence),
+            "pyth_ema_price": _format_optional_float(self.pyth_ema_price),
+            "pyth_ema_confidence": _format_optional_float(self.pyth_ema_confidence),
+            "pyth_publish_time": "" if self.pyth_publish_time is None else str(self.pyth_publish_time),
         }
+
+
+def _optional_float(raw_value: Any) -> float | None:
+    if raw_value in (None, ""):
+        return None
+    return float(raw_value)
+
+
+def _optional_int(raw_value: Any) -> int | None:
+    if raw_value in (None, ""):
+        return None
+    return int(float(raw_value))
+
+
+def _format_optional_float(value: float | None) -> str:
+    return "" if value is None else f"{value:.10f}"
 
 
 @dataclass
